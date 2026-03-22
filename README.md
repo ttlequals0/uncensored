@@ -2,7 +2,7 @@
 
 > Upgrade your playlist. No edits.
 
-A Python CLI tool that scans a YouTube Music playlist and replaces clean/edited songs with their explicit versions where available.
+A Python CLI tool that scans a YouTube Music playlist and replaces clean/edited songs with explicit versions, and finds working replacements for unavailable tracks.
 
 ## Requirements
 
@@ -24,15 +24,18 @@ One-time setup using your browser's logged-in session:
 
 1. Open [YouTube Music](https://music.youtube.com) in your browser and log in
 2. Open Developer Tools (F12) and go to the **Network** tab
-3. Click on any request to `music.youtube.com`
-4. Copy the request headers (right-click the request -> "Copy request headers")
-5. Run setup and paste when prompted:
+3. Find any POST request to `music.youtube.com`
+4. Copy the request headers:
+   - **Firefox:** Right-click the request -> Copy Value -> Copy Request Headers
+   - **Chrome:** Click the request -> Headers tab -> select all header text and copy
+5. Paste into a text file (e.g. `headers.txt`) and save
+6. Run setup and enter the path to your file:
 
 ```bash
-uv run uncensored.py --setup
+uv run uncensored --setup
 ```
 
-Headers are saved to `browser.json` (gitignored). No Google Cloud project needed.
+The tool reads the headers file, extracts the auth cookies, and saves them to `browser.json` (gitignored). No Google Cloud project needed.
 
 ## Finding Your Playlist ID
 
@@ -61,6 +64,9 @@ uv run uncensored PLxxxxxxx --copy
 
 # Copy with a custom name
 uv run uncensored PLxxxxxxx --copy --copy-name "My Explicit Playlist"
+
+# Custom report output path
+uv run uncensored PLxxxxxxx --output report.html
 
 # Enable debug logging
 uv run uncensored PLxxxxxxx --verbose
@@ -128,6 +134,8 @@ For each non-explicit track in your playlist:
 3. Checks that the duration is within 10 seconds of the original (filters out remixes and live versions)
 4. Picks the closest duration match
 
+If no match is found and the track title contains ` - ` (common for user-uploaded YouTube videos like `"Meek Mill ft. Red Cafe - I'm Killin Em"`), the tool parses the real artist and song name from the title, strips featuring tags and producer credits, and searches again.
+
 ### Unavailable tracks
 
 Tracks marked as unavailable by YouTube Music (deleted, region-locked, etc.) are detected during the scan. The tool searches for any available version of the song, preferring explicit versions when available. Unavailable tracks that can't be matched are listed separately in the report.
@@ -151,7 +159,7 @@ If you don't own the playlist, the tool detects the permission error on the firs
 ## Known Limitations
 
 - Songs that were never released with an explicit version appear in the "not found" section of the report
-- User-uploaded YouTube videos (non-official tracks) often can't be matched because the "artist" is a YouTube channel name, not the actual musician
+- User-uploaded YouTube videos work best when the title follows an `"Artist - Song"` pattern. Titles without that format (e.g. just a song name with a channel as the artist) may not match
 - `ytmusicapi` is an unofficial, reverse-engineered library -- it may break if YouTube Music changes their web client
 - The Liked Music playlist does not support track removal (the tool auto-switches to copy mode)
 - Tracks missing a `setVideoId` from the API cannot be removed from playlists
