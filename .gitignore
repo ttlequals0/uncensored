@@ -7,8 +7,15 @@ build/
 .venv/
 venv/
 
-# OAuth credentials
+# Auth credentials
+browser.json
 oauth.json
+client.json
+headers.txt
+headers*.txt
+**/browser.json
+**/oauth*.json
+**/client.json
 
 # Reports
 uncensored_report_*.html
@@ -22,3 +29,4 @@ uncensored_report_*.html
 
 # Claude Code
 .claude/
+CLAUDE.md

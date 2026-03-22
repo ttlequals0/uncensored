@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>uncensored report - {{ playlist_title }}</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666666;
+    --card-bg: #f5f5f5; --border: #e0e0e0;
+    --green: #2e7d32; --red: #c62828; --orange: #ef6c00;
+    --link: #1565c0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1a; --fg: #e0e0e0; --muted: #999999;
+      --card-bg: #2a2a2a; --border: #444444;
+      --green: #66bb6a; --red: #ef5350; --orange: #ffa726;
+      --link: #64b5f6;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--fg);
+    max-width: 960px; margin: 0 auto; padding: 24px 16px;
+    line-height: 1.5;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  .header { margin-bottom: 32px; }
+  .header .meta { color: var(--muted); font-size: 0.875rem; }
+  .mode-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    background: var(--card-bg); border: 1px solid var(--border);
+  }
+  .mode-badge.dry-run { color: var(--orange); border-color: var(--orange); }
+  .mode-badge.copy { color: var(--link); border-color: var(--link); }
+  .mode-badge.in-place { color: var(--green); border-color: var(--green); }
+  .mode-badge.copy-fallback { color: var(--red); border-color: var(--red); }
+  .section { margin-bottom: 32px; }
+  .section h2 { font-size: 1.125rem; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  th { text-align: left; padding: 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }
+  td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .thumb {
+    width: 48px; height: 48px; border-radius: 4px; object-fit: cover;
+    background: var(--card-bg);
+  }
+  .thumb-placeholder {
+    width: 48px; height: 48px; border-radius: 4px;
+    background: var(--card-bg); display: inline-block;
+  }
+  .status-ok { color: var(--green); font-weight: 600; }
+  .status-err { color: var(--red); font-weight: 600; }
+  .status-warn { color: var(--orange); font-weight: 600; }
+  .stats {
+    background: var(--card-bg); border-radius: 8px; padding: 16px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    font-size: 0.875rem;
+  }
+  .stats dt { color: var(--muted); }
+  .stats dd { font-weight: 600; }
+  .fallback-warning {
+    background: var(--card-bg); border-left: 4px solid var(--orange);
+    padding: 12px 16px; margin-bottom: 16px; border-radius: 0 4px 4px 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>uncensored report</h1>
+  <p><a href="{{ playlist_url }}">{{ playlist_title }}</a></p>
+  <p class="meta">
+    <span class="mode-badge {{ mode }}">{{ mode }}</span>
+    &middot; Generated {{ generated_at }}
+  </p>
+  {% if new_playlist_id %}
+  <p class="meta" style="margin-top: 8px;">
+    New playlist: <a href="https://music.youtube.com/playlist?list={{ new_playlist_id }}">{{ new_playlist_title }}</a>
+  </p>
+  {% endif %}
+</div>
+
+{% if copy_mode_fallback %}
+<div class="fallback-warning">
+  You do not own this playlist. The tool automatically fell back to copy mode.
+</div>
+{% endif %}
+
+{% if candidates %}
+<div class="section">
+  <h2>{% if mode == 'dry-run' %}Proposed Changes{% else %}Changes{% endif %} ({{ candidates|length }})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th colspan="2">Original (Clean)</th>
+        <th colspan="2">Replacement (Explicit)</th>
+        {% if results %}<th>Status</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for swap in candidates %}
+      <tr>
+        <td>
+          {% if swap.original.thumbnail_url %}
+          <img class="thumb" src="{{ swap.original.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ swap.original.title }}</strong><br>
+          <span style="color: var(--muted)">{{ swap.original.artist }}</span><br>
+          <a href="{{ swap.original.ytm_link }}">link</a>
+        </td>
+        <td>
+          {% if swap.replacement.thumbnail_url %}
+          <img class="thumb" src="{{ swap.replacement.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ swap.replacement.title }}</strong><br>
+          <span style="color: var(--muted)">{{ swap.replacement.artist }}</span><br>
+          <a href="{{ swap.replacement.ytm_link }}">link</a>
+        </td>
+        {% if results %}
+        <td>
+          {% set r = results[loop.index0] if loop.index0 < results|length else None %}
+          {% if r %}
+            {% if r.success and r.duplicate_warning %}
+              <span class="status-warn">DUPLICATE</span>
+            {% elif r.success %}
+              <span class="status-ok">OK</span>
+            {% else %}
+              <span class="status-err">FAILED</span>
+              {% if r.error %}<br><small style="color: var(--muted)">{{ r.error }}</small>{% endif %}
+            {% endif %}
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if unavailable %}
+<div class="section">
+  <h2>Unavailable Track Replacements ({{ unavailable|length }})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th colspan="2">Original (Unavailable)</th>
+        <th colspan="2">Replacement</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for swap in unavailable %}
+      <tr>
+        <td>
+          {% if swap.original.thumbnail_url %}
+          <img class="thumb" src="{{ swap.original.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ swap.original.title }}</strong><br>
+          <span style="color: var(--muted)">{{ swap.original.artist }}</span><br>
+          <a href="{{ swap.original.ytm_link }}">link</a>
+        </td>
+        <td>
+          {% if swap.replacement.thumbnail_url %}
+          <img class="thumb" src="{{ swap.replacement.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ swap.replacement.title }}</strong><br>
+          <span style="color: var(--muted)">{{ swap.replacement.artist }}</span><br>
+          <a href="{{ swap.replacement.ytm_link }}">link</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if unavailable_not_found %}
+<div class="section">
+  <h2>Unavailable -- No Replacement Found ({{ unavailable_not_found|length }})</h2>
+  <table>
+    <thead>
+      <tr><th></th><th>Title</th><th>Artist</th><th>Link</th></tr>
+    </thead>
+    <tbody>
+      {% for track in unavailable_not_found %}
+      <tr>
+        <td>
+          {% if track.thumbnail_url %}
+          <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>{{ track.title }}</td>
+        <td>{{ track.artist }}</td>
+        <td><a href="{{ track.ytm_link }}">link</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if not_found %}
+<div class="section">
+  <h2>No Explicit Version Found ({{ not_found|length }})</h2>
+  <table>
+    <thead>
+      <tr><th></th><th>Title</th><th>Artist</th><th>Link</th></tr>
+    </thead>
+    <tbody>
+      {% for track in not_found %}
+      <tr>
+        <td>
+          {% if track.thumbnail_url %}
+          <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>{{ track.title }}</td>
+        <td>{{ track.artist }}</td>
+        <td><a href="{{ track.ytm_link }}">link</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if skipped_no_set_id %}
+<div class="section">
+  <h2>Skipped -- Missing setVideoId ({{ skipped_no_set_id|length }})</h2>
+  <p style="color: var(--muted); margin-bottom: 8px; font-size: 0.875rem;">
+    These tracks could not be removed from the playlist because the API did not return a setVideoId.
+  </p>
+  <table>
+    <thead>
+      <tr><th></th><th>Title</th><th>Artist</th><th>Link</th></tr>
+    </thead>
+    <tbody>
+      {% for track in skipped_no_set_id %}
+      <tr>
+        <td>
+          {% if track.thumbnail_url %}
+          <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>{{ track.title }}</td>
+        <td>{{ track.artist }}</td>
+        <td><a href="{{ track.ytm_link }}">link</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="section">
+  <h2>Stats</h2>
+  <dl class="stats">
+    <dt>Start time</dt><dd>{{ start_time }}</dd>
+    <dt>Elapsed</dt><dd>{{ elapsed }}</dd>
+    <dt>Total tracks</dt><dd>{{ total_tracks }}</dd>
+    <dt>Already explicit</dt><dd>{{ already_explicit }}</dd>
+    <dt>{{ replacements_label }}</dt><dd>{{ replacements_count }}</dd>
+    <dt>No explicit version found</dt><dd>{{ not_found_count }}</dd>
+    {% if unavailable_count > 0 %}
+    <dt>Unavailable tracks replaced</dt><dd>{{ unavailable_count }}</dd>
+    {% endif %}
+    {% if unavailable_not_found_count > 0 %}
+    <dt>Unavailable (no replacement)</dt><dd>{{ unavailable_not_found_count }}</dd>
+    {% endif %}
+    {% if skipped_count > 0 %}
+    <dt>Skipped (no setVideoId)</dt><dd>{{ skipped_count }}</dd>
+    {% endif %}
+    {% if errors > 0 %}
+    <dt>Errors</dt><dd>{{ errors }}</dd>
+    {% endif %}
+    {% if duplicates > 0 %}
+    <dt>Duplicate warnings</dt><dd>{{ duplicates }}</dd>
+    {% endif %}
+  </dl>
+</div>
+
+</body>
+</html>
