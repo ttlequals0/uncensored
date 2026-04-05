@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.0] - 2026-04-05
+
+### Added
+- YouTube video fallback search when no explicit YTM song match is found
+- YT Video badge indicator in terminal prompts and HTML reports for video fallback matches
+- YouTube-to-YTM upgrade detection: replaces YouTube-sourced (UGC) tracks with proper YTM versions
+- New "YouTube to YTM Upgrades" section in HTML reports
+- Video fallback and YT upgrade counts in report stats
+- `is_video` and `video_type` fields on TrackInfo for source tracking
+- Strip featuring suffixes (feat., ft.) from titles during match comparison for better accuracy
+- Compound artist matching: splits on & / x / and to match primary artist
+- `--yt-video` flag to opt in to YouTube video fallback for unavailable tracks
+- Unavailable tracks with `--yt-video` show top 2 YouTube video options when strict matching fails
+- Unavailable tracks no longer skipped when missing setVideoId
+
 ## [0.1.0] - 2026-03-22
 
 ### Added

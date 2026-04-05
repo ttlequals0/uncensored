@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -10,11 +11,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scanner import (
     CLEAN_SUFFIXES,
+    VIDEO_TYPE_UGC,
     TrackInfo,
+    _find_video_match,
     _parse_title_for_artist,
+    _primary_artist,
     extract_track_info,
+    find_available_match,
+    find_explicit_match,
+    find_ytm_upgrade,
     normalize_artist,
     normalize_title,
+    normalize_title_for_comparison,
 )
 
 
@@ -61,6 +69,32 @@ class TestNormalizeTitle:
         # Only the clean suffix pattern is stripped, other parens remain
         result = normalize_title("Song (feat. X) (Clean)")
         assert result == "song (feat. x)"
+
+
+class TestNormalizeTitleForComparison:
+    def test_strips_feat_parens(self):
+        assert normalize_title_for_comparison("Play For Keeps (feat. Rondonumbanine)") == "play for keeps"
+
+    def test_strips_ft_parens(self):
+        assert normalize_title_for_comparison("Song (ft. Artist)") == "song"
+
+    def test_strips_featuring_brackets(self):
+        assert normalize_title_for_comparison("Song [featuring Artist]") == "song"
+
+    def test_strips_feat_dot_parens(self):
+        assert normalize_title_for_comparison("Song (feat Artist Name)") == "song"
+
+    def test_strips_clean_and_feat(self):
+        assert normalize_title_for_comparison("Song (feat. X) (Clean)") == "song"
+
+    def test_preserves_non_feat_parens(self):
+        assert normalize_title_for_comparison("Song (Remix)") == "song (remix)"
+
+    def test_no_feat_unchanged(self):
+        assert normalize_title_for_comparison("Normal Song") == "normal song"
+
+    def test_empty_string(self):
+        assert normalize_title_for_comparison("") == ""
 
 
 class TestNormalizeArtist:
@@ -208,3 +242,223 @@ class TestParseTitleForArtist:
     def test_real_youtube_upload_title(self):
         result = _parse_title_for_artist("Bone Crusher - Never Scared (Dirty Version)")
         assert result == ("Bone Crusher", "Never Scared (Dirty Version)")
+
+
+class TestTrackInfoNewFields:
+    def test_is_video_defaults_false(self):
+        raw = {
+            "videoId": "v1",
+            "title": "Song",
+            "artists": [{"name": "Artist"}],
+            "duration_seconds": 200,
+        }
+        track = extract_track_info(raw)
+        assert track.is_video is False
+
+    def test_video_type_extracted(self):
+        raw = {
+            "videoId": "v1",
+            "title": "Song",
+            "artists": [{"name": "Artist"}],
+            "duration_seconds": 200,
+            "videoType": "MUSIC_VIDEO_TYPE_UGC",
+        }
+        track = extract_track_info(raw)
+        assert track.video_type == "MUSIC_VIDEO_TYPE_UGC"
+
+    def test_video_type_none_when_absent(self):
+        raw = {
+            "videoId": "v1",
+            "title": "Song",
+            "artists": [{"name": "Artist"}],
+            "duration_seconds": 200,
+        }
+        track = extract_track_info(raw)
+        assert track.video_type is None
+
+
+def _make_track(title="Test Song", artist="Test Artist", duration=200,
+                video_id="orig1", is_explicit=False, video_type=None):
+    return TrackInfo(
+        video_id=video_id,
+        set_video_id="set1",
+        title=title,
+        artist=artist,
+        album=None,
+        duration_seconds=duration,
+        thumbnail_url=None,
+        ytm_link=f"https://music.youtube.com/watch?v={video_id}",
+        is_explicit=is_explicit,
+        video_type=video_type,
+    )
+
+
+def _make_search_result(title="Test Song", artist="Test Artist", duration=200,
+                        video_id="match1", is_explicit=True):
+    return {
+        "videoId": video_id,
+        "title": title,
+        "artists": [{"name": artist}],
+        "duration_seconds": duration,
+        "isExplicit": is_explicit,
+        "thumbnails": [],
+    }
+
+
+class TestFindVideoMatch:
+    @patch("scanner._find_match_with_title_fallback")
+    def test_returns_track_with_is_video_true(self, mock_fallback):
+        song_match = _make_track(video_id="vid1")
+        mock_fallback.return_value = song_match
+        yt = MagicMock()
+        track = _make_track()
+
+        result = _find_video_match(yt, track)
+
+        assert result is not None
+        assert result.is_video is True
+        assert result.video_id == "vid1"
+        mock_fallback.assert_called_once_with(
+            yt, track, require_explicit=False, search_filter="videos",
+        )
+
+    @patch("scanner._find_match_with_title_fallback")
+    def test_ytm_link_points_to_youtube(self, mock_fallback):
+        song_match = _make_track(video_id="vid1")
+        mock_fallback.return_value = song_match
+        yt = MagicMock()
+        track = _make_track()
+
+        result = _find_video_match(yt, track)
+
+        assert result is not None
+        assert result.ytm_link == "https://www.youtube.com/watch?v=vid1"
+
+    @patch("scanner._find_match_with_title_fallback")
+    def test_returns_none_when_no_results(self, mock_fallback):
+        mock_fallback.return_value = None
+        yt = MagicMock()
+        track = _make_track()
+
+        result = _find_video_match(yt, track)
+
+        assert result is None
+
+
+class TestFindExplicitMatch:
+    @patch("scanner._find_match_with_title_fallback")
+    def test_returns_match(self, mock_fallback):
+        song_match = _make_track(video_id="song1", is_explicit=True)
+        mock_fallback.return_value = song_match
+        yt = MagicMock()
+        track = _make_track()
+
+        result = find_explicit_match(yt, track)
+
+        assert result is song_match
+        mock_fallback.assert_called_once_with(yt, track, require_explicit=True)
+
+    @patch("scanner._find_match_with_title_fallback")
+    def test_returns_none_when_no_match(self, mock_fallback):
+        mock_fallback.return_value = None
+        yt = MagicMock()
+        track = _make_track()
+
+        result = find_explicit_match(yt, track)
+
+        assert result is None
+
+
+class TestFindYtmUpgrade:
+    @patch("scanner._find_match_with_title_fallback")
+    def test_finds_ytm_song_for_ugc_track(self, mock_match):
+        ytm_match = _make_track(video_id="ytm1", is_explicit=True)
+        mock_match.return_value = ytm_match
+        yt = MagicMock()
+        track = _make_track(video_type=VIDEO_TYPE_UGC)
+
+        result = find_ytm_upgrade(yt, track)
+
+        assert result is ytm_match
+        mock_match.assert_called_once_with(yt, track, require_explicit=False)
+
+    @patch("scanner._find_match_with_title_fallback")
+    def test_require_explicit_passed_through(self, mock_match):
+        ytm_match = _make_track(video_id="ytm1", is_explicit=True)
+        mock_match.return_value = ytm_match
+        yt = MagicMock()
+        track = _make_track(video_type=VIDEO_TYPE_UGC, is_explicit=True)
+
+        result = find_ytm_upgrade(yt, track, require_explicit=True)
+
+        assert result is ytm_match
+        mock_match.assert_called_once_with(yt, track, require_explicit=True)
+
+    @patch("scanner._find_match_with_title_fallback")
+    def test_returns_none_when_no_ytm_version(self, mock_match):
+        mock_match.return_value = None
+        yt = MagicMock()
+        track = _make_track(video_type=VIDEO_TYPE_UGC)
+
+        result = find_ytm_upgrade(yt, track)
+
+        assert result is None
+
+
+class TestPrimaryArtist:
+    def test_splits_on_ampersand(self):
+        assert _primary_artist("Artist A & Artist B") == "Artist A"
+
+    def test_splits_on_and(self):
+        assert _primary_artist("Artist A and Artist B") == "Artist A"
+
+    def test_splits_on_feat(self):
+        assert _primary_artist("Artist A feat Artist B") == "Artist A"
+
+    def test_splits_on_ft_dot(self):
+        assert _primary_artist("Artist A ft. Artist B") == "Artist A"
+
+    def test_x_collab_not_split_to_avoid_false_positives(self):
+        # "x" as separator is too ambiguous (matches "dex", "flex", etc.)
+        # These are handled by the double-space fallback after normalization
+        assert _primary_artist("Artist A x Artist B") == "Artist A x Artist B"
+
+    def test_no_separator_returns_full(self):
+        assert _primary_artist("Solo Artist") == "Solo Artist"
+
+    def test_normalized_double_space(self):
+        normed = normalize_artist("Rico Recklezz & DJ Milticket")
+        assert _primary_artist(normed) == "rico recklezz"
+
+    def test_normalized_single_artist(self):
+        normed = normalize_artist("Tee Grizzley")
+        assert _primary_artist(normed) == "tee grizzley"
+
+
+class TestFindAvailableMatchVideoFlag:
+    @patch("scanner._find_video_match")
+    @patch("scanner._find_match_with_title_fallback")
+    def test_no_video_fallback_by_default(self, mock_song, mock_video):
+        mock_song.return_value = None
+        yt = MagicMock()
+        track = _make_track()
+
+        result = find_available_match(yt, track)
+
+        assert result is None
+        mock_video.assert_not_called()
+
+    @patch("scanner._find_video_match")
+    @patch("scanner._find_match_with_title_fallback")
+    def test_video_fallback_when_enabled(self, mock_song, mock_video):
+        mock_song.return_value = None
+        video_match = _make_track(video_id="vid1")
+        video_match.is_video = True
+        mock_video.return_value = video_match
+        yt = MagicMock()
+        track = _make_track()
+
+        result = find_available_match(yt, track, allow_video_fallback=True)
+
+        assert result is video_match
+        assert result.is_video is True

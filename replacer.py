@@ -73,6 +73,17 @@ def replace_in_place(
                 except Exception as e:
                     logger.debug("Move failed (non-fatal): %s", e)
 
+        if swap.original.set_video_id is None:
+            logger.warning(
+                "Cannot remove '%s' by %s (no setVideoId) -- replacement added but original remains",
+                swap.original.title, swap.original.artist,
+            )
+            result.success = True
+            result.duplicate_warning = True
+            report.results.append(result)
+            time.sleep(MUTATION_DELAY)
+            continue
+
         try:
             yt.remove_playlist_items(
                 playlist_id,

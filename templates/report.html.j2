@@ -67,9 +67,45 @@
     background: var(--card-bg); border-left: 4px solid var(--orange);
     padding: 12px 16px; margin-bottom: 16px; border-radius: 0 4px 4px 0;
   }
+  .video-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    background: var(--card-bg); color: var(--orange); border: 1px solid var(--orange);
+    margin-left: 4px; vertical-align: middle;
+  }
 </style>
 </head>
 <body>
+
+{% macro swap_row(swap) %}
+<tr>
+  <td>
+    {% if swap.original.thumbnail_url %}
+    <img class="thumb" src="{{ swap.original.thumbnail_url }}" alt="">
+    {% else %}
+    <span class="thumb-placeholder"></span>
+    {% endif %}
+  </td>
+  <td>
+    <strong>{{ swap.original.title }}</strong><br>
+    <span style="color: var(--muted)">{{ swap.original.artist }}</span><br>
+    <a href="{{ swap.original.ytm_link }}">link</a>
+  </td>
+  <td>
+    {% if swap.replacement.thumbnail_url %}
+    <img class="thumb" src="{{ swap.replacement.thumbnail_url }}" alt="">
+    {% else %}
+    <span class="thumb-placeholder"></span>
+    {% endif %}
+  </td>
+  <td>
+    <strong>{{ swap.replacement.title }}</strong>
+    {% if swap.replacement.is_video %}<span class="video-badge">YT Video</span>{% endif %}<br>
+    <span style="color: var(--muted)">{{ swap.replacement.artist }}</span><br>
+    <a href="{{ swap.replacement.ytm_link }}">link</a>
+  </td>
+</tr>
+{% endmacro %}
 
 <div class="header">
   <h1>uncensored report</h1>
@@ -163,32 +199,29 @@
     </thead>
     <tbody>
       {% for swap in unavailable %}
+      {{ swap_row(swap) }}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if yt_upgrades %}
+<div class="section">
+  <h2>YouTube to YTM Upgrades ({{ yt_upgrades|length }})</h2>
+  <p style="color: var(--muted); margin-bottom: 8px; font-size: 0.875rem;">
+    These YouTube video tracks have a proper YouTube Music version available.
+  </p>
+  <table>
+    <thead>
       <tr>
-        <td>
-          {% if swap.original.thumbnail_url %}
-          <img class="thumb" src="{{ swap.original.thumbnail_url }}" alt="">
-          {% else %}
-          <span class="thumb-placeholder"></span>
-          {% endif %}
-        </td>
-        <td>
-          <strong>{{ swap.original.title }}</strong><br>
-          <span style="color: var(--muted)">{{ swap.original.artist }}</span><br>
-          <a href="{{ swap.original.ytm_link }}">link</a>
-        </td>
-        <td>
-          {% if swap.replacement.thumbnail_url %}
-          <img class="thumb" src="{{ swap.replacement.thumbnail_url }}" alt="">
-          {% else %}
-          <span class="thumb-placeholder"></span>
-          {% endif %}
-        </td>
-        <td>
-          <strong>{{ swap.replacement.title }}</strong><br>
-          <span style="color: var(--muted)">{{ swap.replacement.artist }}</span><br>
-          <a href="{{ swap.replacement.ytm_link }}">link</a>
-        </td>
+        <th colspan="2">Original (YT Video)</th>
+        <th colspan="2">Replacement (YTM)</th>
       </tr>
+    </thead>
+    <tbody>
+      {% for swap in yt_upgrades %}
+      {{ swap_row(swap) }}
       {% endfor %}
     </tbody>
   </table>
@@ -215,6 +248,49 @@
         <td>{{ track.title }}</td>
         <td>{{ track.artist }}</td>
         <td><a href="{{ track.ytm_link }}">link</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if unavailable_video_suggestions %}
+<div class="section">
+  <h2>Unavailable -- YouTube Video Options ({{ unavailable_video_suggestions|length }})</h2>
+  <p style="color: var(--muted); margin-bottom: 8px; font-size: 0.875rem;">
+    No YTM match found. Top YouTube video results shown for review.
+  </p>
+  <table>
+    <thead>
+      <tr><th></th><th>Original</th><th>Option 1</th><th>Option 2</th></tr>
+    </thead>
+    <tbody>
+      {% for vs in unavailable_video_suggestions %}
+      <tr>
+        <td>
+          {% if vs.original.thumbnail_url %}
+          <img class="thumb" src="{{ vs.original.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ vs.original.title }}</strong><br>
+          <span style="color: var(--muted)">{{ vs.original.artist }}</span><br>
+          <a href="{{ vs.original.ytm_link }}">link</a>
+        </td>
+        {% for sug in vs.suggestions %}
+        <td>
+          <strong>{{ sug.title }}</strong>
+          <span class="video-badge">YT Video</span><br>
+          <span style="color: var(--muted)">{{ sug.artist }}</span><br>
+          <a href="{{ sug.ytm_link }}">link</a>
+        </td>
+        {% endfor %}
+        {% if vs.suggestions|length < 2 %}
+        <td></td>
+        {% endif %}
       </tr>
       {% endfor %}
     </tbody>
@@ -288,6 +364,12 @@
     <dt>Already explicit</dt><dd>{{ already_explicit }}</dd>
     <dt>{{ replacements_label }}</dt><dd>{{ replacements_count }}</dd>
     <dt>No explicit version found</dt><dd>{{ not_found_count }}</dd>
+    {% if video_fallback_count > 0 %}
+    <dt>YouTube video fallbacks</dt><dd>{{ video_fallback_count }}</dd>
+    {% endif %}
+    {% if yt_upgrade_count > 0 %}
+    <dt>YouTube-to-YTM upgrades</dt><dd>{{ yt_upgrade_count }}</dd>
+    {% endif %}
     {% if unavailable_count > 0 %}
     <dt>Unavailable tracks replaced</dt><dd>{{ unavailable_count }}</dd>
     {% endif %}

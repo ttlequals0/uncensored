@@ -1,6 +1,6 @@
 [project]
 name = "uncensored"
-version = "0.1.0"
+version = "0.2.0"
 description = "Scan a YouTube Music playlist and replace clean/edited songs with explicit versions"
 requires-python = ">=3.9"
 dependencies = [

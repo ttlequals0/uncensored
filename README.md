@@ -65,6 +65,9 @@ uv run uncensored PLxxxxxxx --copy
 # Copy with a custom name
 uv run uncensored PLxxxxxxx --copy --copy-name "My Explicit Playlist"
 
+# Replace unavailable tracks with YouTube video versions
+uv run uncensored PLxxxxxxx --yt-video
+
 # Custom report output path
 uv run uncensored PLxxxxxxx --output report.html
 
