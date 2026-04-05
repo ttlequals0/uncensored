@@ -15,14 +15,19 @@ CLEAN_SUFFIXES = re.compile(
     re.IGNORECASE
 )
 
-FEAT_SUFFIXES = re.compile(
+_FEAT_SUFFIXES = re.compile(
     r'\s*[\(\[](feat\.?|ft\.?|featuring)\s+[^\)\]]+[\)\]]',
     re.IGNORECASE
 )
 
 _NON_ASCII = re.compile(r'[^\x00-\x7F]')
 
-LIVE_PERFORMANCE = re.compile(r'\blive\b', re.IGNORECASE)
+_LIVE_PERFORMANCE = re.compile(r'\blive\b', re.IGNORECASE)
+
+_PUNCTUATION = re.compile(r'[^\w\s]')
+_LEADING_DIGITS = re.compile(r'^\d+\s+')
+_FEAT_ARTIST = re.compile(r'\s+(?:ft\.?|feat\.?|featuring)\s+.*$', re.IGNORECASE)
+_PROD_TAG = re.compile(r'\s*[\[\(](?:Prod\.?|prod\.?).*?[\]\)]')
 
 SEARCH_DELAY = 0.3
 DURATION_TOLERANCE = 10
@@ -83,18 +88,17 @@ def normalize_title(title: str) -> str:
 
 def normalize_title_for_comparison(title: str) -> str:
     """Strip clean, featuring, and similar suffixes for title matching."""
-    return FEAT_SUFFIXES.sub('', normalize_title(title)).strip()
+    return _FEAT_SUFFIXES.sub('', normalize_title(title)).strip()
 
 
 def normalize_artist(name: str) -> str:
     """Lowercase and strip punctuation, emojis, and non-ASCII characters."""
     name = _NON_ASCII.sub('', name)
-    return re.sub(r'[^\w\s]', '', name).strip().lower()
+    return _PUNCTUATION.sub('', name).strip().lower()
 
 
 def _is_live_performance(title: str) -> bool:
-    """Check if a title indicates a live performance recording."""
-    return LIVE_PERFORMANCE.search(title) is not None
+    return _LIVE_PERFORMANCE.search(title) is not None
 
 
 def _primary_artist(name: str) -> str:
@@ -246,10 +250,9 @@ def _parse_title_for_artist(title: str) -> tuple[str, str] | None:
     if not raw_artist or not raw_song:
         return None
 
-    raw_artist = re.sub(r'^\d+\s+', '', raw_artist)
-    # Strip featuring suffixes so "Meek Mill ft. Red Cafe" matches "Meek Mill"
-    raw_artist = re.sub(r'\s+(?:ft\.?|feat\.?|featuring)\s+.*$', '', raw_artist, flags=re.IGNORECASE)
-    raw_song = re.sub(r'\s*[\[\(](?:Prod\.?|prod\.?).*?[\]\)]', '', raw_song).strip()
+    raw_artist = _LEADING_DIGITS.sub('', raw_artist)
+    raw_artist = _FEAT_ARTIST.sub('', raw_artist)
+    raw_song = _PROD_TAG.sub('', raw_song).strip()
 
     return raw_artist, raw_song
 
@@ -288,7 +291,6 @@ def _find_match_with_title_fallback(
 
 
 def _tag_as_video(track: TrackInfo) -> TrackInfo:
-    """Mark a TrackInfo as a YouTube video result and fix its link."""
     track.is_video = True
     track.ytm_link = f"https://www.youtube.com/watch?v={track.video_id}"
     return track
@@ -304,7 +306,7 @@ def _find_video_match(yt: YTMusic, track: TrackInfo) -> TrackInfo | None:
         yt, track, require_explicit=False, search_filter="videos",
     )
     if match:
-        _tag_as_video(match)
+        match = _tag_as_video(match)
     return match
 
 
@@ -341,9 +343,8 @@ def find_video_suggestions(yt: YTMusic, track: TrackInfo, limit: int = 2) -> lis
         return []
     suggestions = []
     for r in results:
-        title = r.get("title", "").lower()
-        # Skip live performances but not titles where "live" means something else
-        if _is_live_performance(title) and not _is_live_performance(track.title.lower()):
+        result_title = r.get("title", "")
+        if _is_live_performance(result_title) and not _is_live_performance(track.title):
             continue
         suggestions.append(_tag_as_video(extract_track_info(r)))
         if len(suggestions) >= limit:
@@ -409,14 +410,13 @@ def scan_playlist(
             logger.info("No replacement found for unavailable: '%s' by %s", track.title, track.artist)
             continue
 
-        if track.is_explicit:
-            # Explicit UGC tracks still get checked for a YTM upgrade below,
-            # but explicit non-UGC tracks are already in the best state.
-            if track.video_type != VIDEO_TYPE_UGC:
-                result.already_explicit_count += 1
-                if progress_callback:
-                    progress_callback(i + 1, total, track, "explicit")
-                continue
+        # Explicit non-UGC tracks need no changes. Explicit UGC tracks
+        # fall through to the upgrade block below.
+        if track.is_explicit and track.video_type != VIDEO_TYPE_UGC:
+            result.already_explicit_count += 1
+            if progress_callback:
+                progress_callback(i + 1, total, track, "explicit")
+            continue
 
         if track.set_video_id is None:
             logger.warning(

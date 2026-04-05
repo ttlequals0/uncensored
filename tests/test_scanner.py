@@ -81,7 +81,7 @@ class TestNormalizeTitleForComparison:
     def test_strips_featuring_brackets(self):
         assert normalize_title_for_comparison("Song [featuring Artist]") == "song"
 
-    def test_strips_feat_dot_parens(self):
+    def test_strips_feat_no_dot_parens(self):
         assert normalize_title_for_comparison("Song (feat Artist Name)") == "song"
 
     def test_strips_clean_and_feat(self):

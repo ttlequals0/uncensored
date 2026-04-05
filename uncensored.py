@@ -31,6 +31,8 @@ __version__ = "0.2.0"
 console = Console()
 logger = logging.getLogger("uncensored")
 
+_YT_VIDEO_TAG = " [bold yellow][YT Video][/bold yellow]"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -56,7 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _track_table(title: str, track: TrackInfo) -> Table:
-    """Build a Rich Table displaying a single track's info."""
     table = Table(title=title, show_header=False, title_style="bold", title_justify="left")
     table.add_column("", style="dim")
     table.add_column("")
@@ -74,7 +75,7 @@ def prompt_confirmations(candidates: list[SwapCandidate], label: str = "Clean") 
     for i, swap in enumerate(candidates):
         console.print(f"\n[bold]#{i + 1} of {total}[/bold]")
 
-        video_tag = " [bold yellow][YT Video][/bold yellow]" if swap.replacement.is_video else ""
+        video_tag = _YT_VIDEO_TAG if swap.replacement.is_video else ""
 
         console.print(_track_table("Current", swap.original))
         console.print(_track_table(f"Replacement{video_tag}", swap.replacement))
@@ -110,7 +111,7 @@ def prompt_video_suggestions(suggestions: list[VideoSuggestion]) -> list[SwapCan
 
         for j, sug in enumerate(vs.suggestions):
             console.print(_track_table(
-                f"Option {j + 1} [bold yellow][YT Video][/bold yellow]", sug,
+                f"Option {j + 1}{_YT_VIDEO_TAG}", sug,
             ))
 
         while True:
@@ -245,7 +246,7 @@ def main() -> None:
                 console.print("\n[bold]Unavailable track replacements:[/bold]")
                 confirmed.extend(prompt_confirmations(scan.unavailable, label="Unavailable"))
 
-        if not args.dry_run and not args.yes and scan.unavailable_video_suggestions:
+        if not args.yes and scan.unavailable_video_suggestions:
             console.print("\n[bold]YouTube video options for unavailable tracks:[/bold]")
             video_confirmed = prompt_video_suggestions(scan.unavailable_video_suggestions)
             confirmed.extend(video_confirmed)
