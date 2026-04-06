@@ -24,12 +24,14 @@ from reporter import (
     generate_report,
     open_report,
 )
-from scanner import LIKED_MUSIC_PLAYLIST_ID, SwapCandidate, scan_playlist
+from scanner import LIKED_MUSIC_PLAYLIST_ID, SwapCandidate, TrackInfo, VideoSuggestion, scan_playlist
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 console = Console()
 logger = logging.getLogger("uncensored")
+
+_YT_VIDEO_TAG = " [bold yellow][YT Video][/bold yellow]"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,9 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Path for HTML report output.")
     parser.add_argument("--auth", default="./browser.json", help="Path to auth credentials file.")
     parser.add_argument("--setup", action="store_true", help="Run browser auth setup and exit.")
+    parser.add_argument("--yt-video", action="store_true", help="Replace unavailable tracks with YouTube video versions when no YTM match exists.")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     parser.add_argument("--version", action="version", version=f"uncensored {__version__}")
     return parser
+
+
+def _track_table(title: str, track: TrackInfo) -> Table:
+    table = Table(title=title, show_header=False, title_style="bold", title_justify="left")
+    table.add_column("", style="dim")
+    table.add_column("")
+    table.add_row("Title", track.title)
+    table.add_row("Artist", track.artist)
+    table.add_row("Link", track.ytm_link)
+    return table
 
 
 def prompt_confirmations(candidates: list[SwapCandidate], label: str = "Clean") -> list[SwapCandidate]:
@@ -62,16 +75,10 @@ def prompt_confirmations(candidates: list[SwapCandidate], label: str = "Clean") 
     for i, swap in enumerate(candidates):
         console.print(f"\n[bold]#{i + 1} of {total}[/bold]")
 
-        table = Table(show_header=True, header_style="bold")
-        table.add_column("", style="dim")
-        table.add_column(f"Current ({label})")
-        table.add_column("Replacement")
+        video_tag = _YT_VIDEO_TAG if swap.replacement.is_video else ""
 
-        table.add_row("Title", swap.original.title, swap.replacement.title)
-        table.add_row("Artist", swap.original.artist, swap.replacement.artist)
-        table.add_row("Link", swap.original.ytm_link, swap.replacement.ytm_link)
-
-        console.print(table)
+        console.print(_track_table("Current", swap.original))
+        console.print(_track_table(f"Replacement{video_tag}", swap.replacement))
 
         while True:
             response = console.input("[bold][y][/bold] Yes  [bold][n][/bold] No  [bold][a][/bold] Accept All  [bold][q][/bold] Quit: ").strip().lower()
@@ -88,6 +95,40 @@ def prompt_confirmations(candidates: list[SwapCandidate], label: str = "Clean") 
                 return confirmed
             else:
                 console.print("[dim]Please enter y, n, a, or q.[/dim]")
+
+    return confirmed
+
+
+def prompt_video_suggestions(suggestions: list[VideoSuggestion]) -> list[SwapCandidate]:
+    """Prompt the user to pick from YouTube video suggestions for unavailable tracks."""
+    confirmed = []
+    total = len(suggestions)
+
+    for i, vs in enumerate(suggestions):
+        console.print(f"\n[bold]#{i + 1} of {total}[/bold]")
+
+        console.print(_track_table("Unavailable", vs.original))
+
+        for j, sug in enumerate(vs.suggestions):
+            console.print(_track_table(
+                f"Option {j + 1}{_YT_VIDEO_TAG}", sug,
+            ))
+
+        while True:
+            choices = ", ".join(str(j + 1) for j in range(len(vs.suggestions)))
+            response = console.input(
+                f"  Pick [{choices}] or [bold]\\[s][/bold] Skip  [bold]\\[q][/bold] Quit: "
+            ).strip().lower()
+            if response == "s":
+                break
+            elif response == "q":
+                return confirmed
+            elif response.isdigit() and 1 <= int(response) <= len(vs.suggestions):
+                picked = vs.suggestions[int(response) - 1]
+                confirmed.append(SwapCandidate(original=vs.original, replacement=picked))
+                break
+            else:
+                console.print(f"[dim]Please enter {choices}, s, or q.[/dim]")
 
     return confirmed
 
@@ -136,17 +177,41 @@ def main() -> None:
             console.print(f"  [{current}/{total}] Unavailable: {track.artist} - {track.title}", style="yellow")
         elif status == "explicit":
             console.print(f"  [{current}/{total}] Already explicit: {track.artist} - {track.title}", style="dim")
+        elif status == "yt_upgrade":
+            console.print(f"  [{current}/{total}] YT upgrade search: {track.artist} - {track.title}", style="cyan")
 
-    scan = scan_playlist(yt, all_tracks, progress_callback=show_progress)
+    scan = scan_playlist(
+        yt, all_tracks,
+        progress_callback=show_progress,
+        allow_video_fallback=args.yt_video,
+    )
+
+    video_fallback_count = sum(1 for c in scan.unavailable if c.replacement.is_video)
 
     console.print(
         f"\nScan complete. Found [bold]{len(scan.candidates)}[/bold] explicit replacements "
         f"across [bold]{total_tracks}[/bold] songs."
     )
 
+    if video_fallback_count:
+        console.print(
+            f"  {video_fallback_count} unavailable track(s) replaced with YouTube video fallbacks"
+        )
+
+    if scan.yt_upgrades:
+        console.print(
+            f"Found [bold]{len(scan.yt_upgrades)}[/bold] YouTube-to-YTM upgrades."
+        )
+
     if scan.unavailable:
         console.print(
             f"Found [bold]{len(scan.unavailable)}[/bold] replacements for unavailable tracks."
+        )
+
+    if scan.unavailable_video_suggestions:
+        console.print(
+            f"Found [bold]{len(scan.unavailable_video_suggestions)}[/bold] unavailable track(s) "
+            f"with YouTube video options (see report)."
         )
 
     if scan.unavailable_not_found:
@@ -161,7 +226,7 @@ def main() -> None:
 
     console.print()
 
-    all_swap_candidates = scan.candidates + scan.unavailable
+    all_swap_candidates = scan.candidates + scan.unavailable + scan.yt_upgrades
 
     if args.dry_run:
         confirmed = all_swap_candidates
@@ -174,9 +239,26 @@ def main() -> None:
             if scan.candidates:
                 console.print("[bold]Explicit replacements:[/bold]")
                 confirmed.extend(prompt_confirmations(scan.candidates, label="Clean"))
+            if scan.yt_upgrades:
+                console.print("\n[bold]YouTube-to-YTM upgrades:[/bold]")
+                confirmed.extend(prompt_confirmations(scan.yt_upgrades, label="YT Video"))
             if scan.unavailable:
                 console.print("\n[bold]Unavailable track replacements:[/bold]")
                 confirmed.extend(prompt_confirmations(scan.unavailable, label="Unavailable"))
+
+        if not args.yes and scan.unavailable_video_suggestions:
+            console.print("\n[bold]YouTube video options for unavailable tracks:[/bold]")
+            video_confirmed = prompt_video_suggestions(scan.unavailable_video_suggestions)
+            confirmed.extend(video_confirmed)
+            # Move confirmed video suggestions into unavailable list so the
+            # report shows them as applied replacements, not just suggestions
+            scan.unavailable.extend(video_confirmed)
+            confirmed_ids = {s.original.video_id for s in video_confirmed}
+            scan.unavailable_video_suggestions = [
+                vs for vs in scan.unavailable_video_suggestions
+                if vs.original.video_id not in confirmed_ids
+            ]
+
         mode = MODE_COPY if use_copy else MODE_IN_PLACE
 
     copy_name = args.copy_name or f"{playlist_title} [Uncensored]"
@@ -222,6 +304,8 @@ def main() -> None:
             skipped_no_set_id=scan.skipped_no_set_id,
             unavailable=scan.unavailable,
             unavailable_not_found=scan.unavailable_not_found,
+            unavailable_video_suggestions=scan.unavailable_video_suggestions,
+            yt_upgrades=scan.yt_upgrades,
             already_explicit_count=scan.already_explicit_count,
             total_tracks=total_tracks,
             replacement_report=replacement_report,
