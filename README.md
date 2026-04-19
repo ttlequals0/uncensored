@@ -68,6 +68,9 @@ uv run uncensored PLxxxxxxx --copy --copy-name "My Explicit Playlist"
 # Replace unavailable tracks with YouTube video versions
 uv run uncensored PLxxxxxxx --yt-video
 
+# Preserve the original track's playlist position (flips playlist to Manual sort)
+uv run uncensored PLxxxxxxx --preserve-position
+
 # Custom report output path
 uv run uncensored PLxxxxxxx --output report.html
 
@@ -147,11 +150,12 @@ Tracks marked as unavailable by YouTube Music (deleted, region-locked, etc.) are
 
 When run without `--copy`, replacements happen directly in the original playlist:
 
-1. The explicit version is added to the playlist
-2. It is moved to the same position as the original track
-3. The original clean/unavailable track is removed
+1. The explicit version is added to the playlist (appended)
+2. The original clean/unavailable track is removed
 
-Playlist order is preserved.
+By default, replacements are NOT reordered into the original track's slot. This avoids flipping the playlist's server-side sort to Manual, so "Recently added" remains the default sort in the YouTube Music UI and new songs added later continue to appear where you expect them.
+
+Pass `--preserve-position` to restore the old behavior: the replacement is moved to the original's slot (via YouTube Music's reorder API). This flips the playlist's default sort to Manual for all future viewers.
 
 ### Copy mode (`--copy`)
 
@@ -167,6 +171,7 @@ If you don't own the playlist, the tool detects the permission error on the firs
 - The Liked Music playlist does not support track removal (the tool auto-switches to copy mode)
 - Tracks missing a `setVideoId` from the API cannot be removed from playlists
 - Browser auth headers expire periodically -- re-run `--setup` if you get auth errors
+- Replacement tracks always get a fresh `dateAdded` timestamp -- YouTube Music does not expose any API to preserve the original track's `dateAdded`. When the playlist is sorted by "Recently added" in the UI, replaced tracks will cluster at the top of the list. Use `--copy` to start fresh with clean timestamps on a new playlist, at the cost of a new playlist URL
 
 ## Report
 

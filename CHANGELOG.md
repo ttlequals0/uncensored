@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- In-place replacements no longer reorder the replacement into the original track's slot by default. This avoids flipping the YouTube Music playlist's server-side sort to Manual, preserving "Recently added" as the default sort
+
+### Added
+- `--preserve-position` flag to restore the previous behavior of moving the replacement into the original track's playlist position (still flips the playlist to Manual sort)
+
 ## [0.2.0] - 2026-04-05
 
 ### Added

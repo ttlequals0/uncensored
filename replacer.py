@@ -39,12 +39,44 @@ def _extract_set_video_id(add_response) -> str | None:
     return None
 
 
+def _move_before_original(
+    yt: YTMusic,
+    playlist_id: str,
+    add_response,
+    original_svid: str | None,
+) -> None:
+    """Move the just-added track to sit immediately before the original.
+
+    Swallows errors because the replacement was already added successfully;
+    a failed reorder shouldn't fail the whole swap.
+    """
+    if not original_svid:
+        return
+    new_svid = _extract_set_video_id(add_response)
+    if not new_svid:
+        return
+    try:
+        yt.edit_playlist(playlist_id, moveItem=(new_svid, original_svid))
+        logger.info("Moved replacement before original")
+        time.sleep(MUTATION_DELAY)
+    except Exception as e:
+        logger.debug("Move failed (non-fatal): %s", e)
+
+
 def replace_in_place(
     yt: YTMusic,
     playlist_id: str,
     confirmed: list[SwapCandidate],
+    preserve_position: bool = False,
 ) -> ReplacementReport:
-    """Replace tracks in the original playlist, maintaining position."""
+    """Replace tracks in the original playlist.
+
+    When preserve_position is True, replacements are moved to sit
+    immediately before the original track. This flips the playlist's
+    server-side "Ordering" to Manual in YouTube Music. Default False:
+    replacements are appended, which preserves the playlist's
+    Recently-added default sort.
+    """
     report = ReplacementReport()
 
     for swap in confirmed:
@@ -62,16 +94,8 @@ def replace_in_place(
 
         time.sleep(MUTATION_DELAY)
 
-        original_svid = swap.original.set_video_id
-        if original_svid:
-            new_svid = _extract_set_video_id(add_response)
-            if new_svid:
-                try:
-                    yt.edit_playlist(playlist_id, moveItem=(new_svid, original_svid))
-                    logger.info("Moved replacement before original")
-                    time.sleep(MUTATION_DELAY)
-                except Exception as e:
-                    logger.debug("Move failed (non-fatal): %s", e)
+        if preserve_position:
+            _move_before_original(yt, playlist_id, add_response, swap.original.set_video_id)
 
         if swap.original.set_video_id is None:
             logger.warning(
