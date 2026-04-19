@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth", default="./browser.json", help="Path to auth credentials file.")
     parser.add_argument("--setup", action="store_true", help="Run browser auth setup and exit.")
     parser.add_argument("--yt-video", action="store_true", help="Replace unavailable tracks with YouTube video versions when no YTM match exists.")
+    parser.add_argument(
+        "--preserve-position",
+        action="store_true",
+        help="Keep replacement tracks in the original track's playlist position. "
+             "Flips the playlist to Manual sort in YouTube Music.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     parser.add_argument("--version", action="version", version=f"uncensored {__version__}")
     return parser
@@ -275,7 +281,10 @@ def main() -> None:
                 )
         else:
             console.print("Applying replacements...\n")
-            replacement_report = replace_in_place(yt, args.playlist_id, confirmed)
+            replacement_report = replace_in_place(
+                yt, args.playlist_id, confirmed,
+                preserve_position=args.preserve_position,
+            )
 
             if replacement_report.copy_mode_fallback:
                 console.print(
