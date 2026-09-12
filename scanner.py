@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -53,6 +54,8 @@ class TrackInfo:
     is_available: bool = True
     is_video: bool = False
     video_type: str | None = None
+    # Playlist index (None for search results): the only id unavailable/unowned entries have
+    position: int | None = None
 
 
 @dataclass
@@ -131,7 +134,9 @@ def _primary_artist(name: str) -> str:
     return name
 
 
-def extract_track_info(track: dict, playlist_id: str | None = None) -> TrackInfo:
+def extract_track_info(
+    track: dict, playlist_id: str | None = None, position: int | None = None,
+) -> TrackInfo:
     """Convert a raw API track dict into a TrackInfo dataclass.
 
     playlist_id pins playlist-entry links to the playlist context; without it
@@ -161,6 +166,7 @@ def extract_track_info(track: dict, playlist_id: str | None = None) -> TrackInfo
         is_explicit=track.get("isExplicit", False),
         is_available=track.get("isAvailable", True),
         video_type=track.get("videoType"),
+        position=position,
     )
 
 
@@ -391,14 +397,19 @@ def scan_playlist(
     progress_callback: Callable | None = None,
     allow_video_fallback: bool = False,
     playlist_id: str | None = None,
+    copy_mode: bool = False,
 ) -> ScanResult:
-    """Scan pre-fetched tracks and find explicit replacements for clean ones."""
+    """Scan pre-fetched tracks and find explicit replacements for clean ones.
+
+    copy_mode: the swaps go into a new playlist, so tracks without a
+    setVideoId (never removable in-place) are still searched.
+    """
     logger.info("Scanning %d tracks", len(tracks))
     result = ScanResult()
     total = len(tracks)
 
     for i, raw_track in enumerate(tracks):
-        track = extract_track_info(raw_track, playlist_id)
+        track = extract_track_info(raw_track, playlist_id, position=i)
         logger.debug("[%d/%d] Processing: %s - %s", i + 1, total, track.artist, track.title)
 
         # Handle unavailable tracks -- find any working replacement
@@ -439,7 +450,7 @@ def scan_playlist(
                 progress_callback(i + 1, total, track, "explicit")
             continue
 
-        if track.set_video_id is None:
+        if track.set_video_id is None and not copy_mode:
             logger.warning(
                 "Track '%s' by %s has no setVideoId -- cannot be removed. Skipping.",
                 track.title, track.artist,
@@ -486,9 +497,26 @@ def scan_playlist(
     return result
 
 
+def _keep_chars(text: str, drop: str) -> str:
+    """Drop chars whose Unicode category starts with a letter in drop, plus emoji
+    variation selectors. Unlike a word-char regex, combining marks survive."""
+    return "".join(
+        c for c in text
+        if unicodedata.category(c)[0] not in drop and not "\ufe00" <= c <= "\ufe0f"
+    )
+
+
 def dedupe_key(title: str, artist: str) -> str:
-    """Canonical key for duplicate detection: same song, any version."""
-    return f"{normalize_title_for_comparison(title)}|{_primary_artist(normalize_artist(artist))}"
+    """Canonical key for duplicate detection: same song, any version. Keeps
+    non-ASCII letters (the search normalizers strip them) and ignores emoji."""
+    # NFKC: the same text in composed and decomposed (or fullwidth) form must match
+    title = unicodedata.normalize("NFKC", title)
+    artist = unicodedata.normalize("NFKC", artist)
+    title_core = _FEAT_SUFFIXES.sub("", CLEAN_SUFFIXES.sub("", title))
+    title_key = " ".join(_keep_chars(title_core, "SC").casefold().split())
+    # Dropping punctuation leaves the double space _primary_artist splits on
+    artist_key = _primary_artist(_keep_chars(artist, "SCP").casefold().strip())
+    return f"{title_key or title.strip().casefold()}|{artist_key or artist.strip().casefold()}"
 
 
 def _is_duplicate_pair(a: TrackInfo, b: TrackInfo) -> bool:
@@ -544,19 +572,20 @@ def find_duplicates(tracks: list[TrackInfo]) -> list[DuplicateGroup]:
     return groups
 
 
-def dedupe_playlist(raw_tracks: list[dict], playlist_id: str | None = None) -> DedupeResult:
+def dedupe_playlist(
+    raw_tracks: list[dict], playlist_id: str | None = None, copy_mode: bool = False,
+) -> DedupeResult:
     """Find duplicate songs in raw playlist tracks (no network calls).
 
     Losers without setVideoId stay in their group (copy mode can still
-    drop them) and are also listed in skipped_no_set_id as the in-place
-    removal caveat.
+    drop them). For in-place runs they are also listed in skipped_no_set_id.
     """
-    tracks = [extract_track_info(t, playlist_id) for t in raw_tracks]
+    tracks = [extract_track_info(t, playlist_id, position=i) for i, t in enumerate(raw_tracks)]
     result = DedupeResult(total_tracks=len(tracks))
 
     for group in find_duplicates(tracks):
         for loser in group.losers:
-            if loser.set_video_id is None:
+            if loser.set_video_id is None and not copy_mode:
                 logger.warning(
                     "Duplicate loser '%s' by %s has no setVideoId -- cannot be removed in-place.",
                     loser.title, loser.artist,

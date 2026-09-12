@@ -68,32 +68,34 @@ def generate_report(ctx: ReportContext, output_path: str | None = None) -> str:
 
     rem = ctx.removal_report
     removal_results = rem.results if rem else []
-    removal_status = {(r.track.video_id, r.track.set_video_id): r for r in removal_results}
+    # Keyed by playlist position: identical copies share videoId, and unowned
+    # entries share an empty setVideoId
+    removal_status = {r.track.position: r for r in removal_results}
     duplicates_removed = sum(1 for r in removal_results if r.success)
     dedupe_loser_count = sum(len(g.losers) for g in ctx.duplicate_groups)
+    copy_made = bool(rem and rem.new_playlist_id)
+    # Only populated for in-place runs, where these losers cannot be removed
+    unremovable = {t.position for t in ctx.dedupe_skipped_no_set_id}
 
     def _dedupe_row(t: TrackInfo, is_winner: bool) -> dict:
         if is_winner:
             return {"track": t, "status": "keep", "error": None}
-        if t.set_video_id is None:
+        r = removal_status.get(t.position)
+        if r is not None:
+            if not r.success:
+                return {"track": t, "status": "failed", "error": r.error}
+            return {"track": t, "status": "dropped-in-copy" if copy_made else "removed", "error": None}
+        if t.position in unremovable:
             return {"track": t, "status": "no-setvideo-id", "error": None}
-        r = removal_status.get((t.video_id, t.set_video_id))
-        if r is None:
-            if ctx.mode == MODE_DRY_RUN:
-                return {"track": t, "status": "pending", "error": None}
-            if rem and rem.new_playlist_id:
-                return {"track": t, "status": "dropped-in-copy", "error": None}
-            return {"track": t, "status": "not-removed", "error": None}
-        if r.success:
-            return {"track": t, "status": "removed", "error": None}
-        return {"track": t, "status": "failed", "error": r.error}
+        if ctx.mode == MODE_DRY_RUN:
+            return {"track": t, "status": "pending", "error": None}
+        # Not confirmed (answered n, or never reached after q), or the run failed
+        return {"track": t, "status": "not-removed", "error": None}
 
-    # Identity-safe winner marking (dataclass __eq__ would match identical
-    # duplicate copies, so compare object identity when building the view).
     dedupe_view = [
         {
             "winner": g.winner,
-            "rows": [_dedupe_row(t, t is g.winner) for t in g.tracks],
+            "rows": [_dedupe_row(t, t.position == g.winner.position) for t in g.tracks],
         }
         for g in ctx.duplicate_groups
     ]
@@ -113,8 +115,12 @@ def generate_report(ctx: ReportContext, output_path: str | None = None) -> str:
             replacements_label = "Removals proposed"
             replacements_count = dedupe_loser_count
         else:
-            replacements_label = "Duplicate copies removed"
+            replacements_label = (
+                "Duplicate copies left out of copy" if copy_made else "Duplicate copies removed"
+            )
             replacements_count = duplicates_removed
+
+    failed_adds = (rpt.failed_adds if rpt else []) + (rem.failed_adds if rem else [])
 
     env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
     template = env.get_template("report.html.j2")
@@ -154,6 +160,7 @@ def generate_report(ctx: ReportContext, output_path: str | None = None) -> str:
         yt_upgrade_count=yt_upgrade_count,
         errors=errors,
         duplicates=duplicates,
+        failed_adds=failed_adds,
     )
 
     Path(output_path).write_text(html, encoding="utf-8")

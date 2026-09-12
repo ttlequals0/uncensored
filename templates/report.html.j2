@@ -148,6 +148,13 @@
 </div>
 {% endif %}
 
+{% if failed_adds %}
+<div class="fallback-warning">
+  {{ failed_adds|length }} track(s) could not be added to the new playlist:
+  {% for vid in failed_adds %}<a href="https://music.youtube.com/watch?v={{ vid }}">{{ vid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+</div>
+{% endif %}
+
 {% if dedupe_view %}
 <div class="section">
   <h2>Duplicate Groups ({{ dedupe_view|length }})</h2>
@@ -427,6 +434,9 @@
     {% endif %}
     {% if duplicates > 0 %}
     <dt>Duplicate warnings</dt><dd>{{ duplicates }}</dd>
+    {% endif %}
+    {% if failed_adds %}
+    <dt>Missing from new playlist</dt><dd>{{ failed_adds|length }}</dd>
     {% endif %}
   </dl>
 </div>

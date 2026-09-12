@@ -3,24 +3,30 @@
 ## [Unreleased]
 
 ### Security
-- Updated transitive dependencies to versions that patch open Dependabot advisories: `requests>=2.33.0`, `urllib3>=2.7.0`, `idna>=3.15`, `Pygments>=2.20.0`, and dev `pytest>=9.0.3` (supersedes PR #4, whose versions are overtaken)
+- Refreshed `uv.lock` to versions that patch the open Dependabot advisories: requests 2.34.2, urllib3 2.7.0, idna 3.19, Pygments 2.21.0 and pytest 9.1.1 (supersedes PR #4, whose versions are overtaken). The dev dependency floor is now `pytest>=9.0.3`
 
 ### Changed
 - In-place replacements no longer reorder the replacement into the original track's slot by default. This avoids flipping the YouTube Music playlist's server-side sort to Manual, preserving "Recently added" as the default sort
+- Raised minimum versions: `ytmusicapi>=1.12.2` (was 1.7.0) and Python 3.10+ (ytmusicapi itself dropped 3.9 in its 1.11.0 release, so the old 3.9 floor could not install); `reporter.py` gained the `from __future__ import annotations` import it was missing either way
 
 ### Fixed
 - Links for playlist entries now pin to the playlist (`watch?v=...&list=...`), the same way the YouTube Music UI links them. Bare `watch?v=` links for album-sourced entries get remapped by YouTube Music to a different video or an autoplay mix when opened standalone
 - Interactive prompts now mark original tracks that are unavailable on YouTube Music. Their links cannot land anywhere (YouTube Music jumps to the nearest playable entry), which previously made correct matches look like mismatches
 - Browser auth setup now strips replay-hostile headers (content-encoding, hop-by-hop headers, and the stray HTTP request line Firefox/Chrome copies into the header list) from browser.json, and ensures the SAPISIDHASH auth marker ytmusicapi needs to detect browser auth is present; existing credential files are repaired automatically on load. Previously these caused the YouTube API to answer `400 Bad Request` with an HTML page, which surfaced as a JSON decode error
+- Copy mode now matches swaps to playlist entries by position instead of videoId. Unavailable tracks can share an empty videoId, so several of them got one replacement between them (the others' replacements were never added but still reported as applied). The same videoId assumption also hid unpicked YouTube video suggestions from the report after one was picked
+- Copy mode on a playlist without `setVideoId`s (every playlist you don't own) now searches clean tracks for explicit versions. They were skipped as unremovable, so the copy only got unavailable-track swaps
+- Playlist edits now check the status ytmusicapi returns, which reports a rejected edit instead of raising. A rejected add no longer leads to the original being removed (when the replacement is already in the playlist, the add is skipped, since YouTube Music rejects re-adding it, and only the original is removed), a rejected removal is no longer reported as done, and a failed playlist creation is caught instead of passing the error response on as a playlist id
+- Tracks that cannot be added to a new playlist, even after the one-by-one retry, are now listed in the console and the report instead of only a debug log
+- When an in-place run falls back to copy mode after a permission error, the copy now carries every confirmed swap. It used to leave out swaps already applied in place, which put their clean originals back, and it never printed the new playlist link
 
 ### Added
 - `--preserve-position` flag to restore the previous behavior of moving the replacement into the original track's playlist position (still flips the playlist to Manual sort)
 - `--dedupe` standalone mode: finds duplicate songs (same title/artist within 10s duration, or identical uploads), keeps the best copy (available > unavailable, official > YouTube upload, explicit > clean, earliest position breaks ties), and removes the rest after interactive confirmation
-- Up-front unowned-playlist detection: when no playlist entries expose a `setVideoId`, both the replacement flow and dedupe switch to copy mode instead of firing doomed write requests
-- Dedupe copy-mode fallback: builds the deduped copy even when no confirmed duplicate can be removed in-place; copy rebuild drops entries lacking a `setVideoId` positionally by videoId
-- "Duplicate Groups" report section with KEEP/REMOVED verdicts per copy, plus a NO SETVIDEOID verdict for copies in-place removal cannot touch
-- Positional copy rebuild for dedupe (`copy_playlist_without`), so identical videoIds added multiple times keep correct per-entry counts in copies
-- Raised minimum versions: `ytmusicapi>=1.12.2` (was 1.7.0) and Python 3.10+ (ytmusicapi itself dropped 3.9 in its 1.11.0 release, making the old floor fiction); `reporter.py` gained the `from __future__ import annotations` import it was missing either way
+- Up-front unowned-playlist detection: when no playlist entries expose a `setVideoId`, both the replacement flow and dedupe switch to copy mode instead of firing doomed write requests. Dry runs switch too (as do Liked Music dry runs), so the report previews what a real run would do
+- Dedupe copy-mode fallback: builds the deduped copy even when no confirmed duplicate can be removed in-place
+- Dedupe matching keeps letters in any script: titles and artists are compared NFKC-normalized and casefolded, ignoring emoji and clean/edited/featuring suffixes. The ASCII-only search normalizer would have reduced different non-Latin titles by one artist to the same empty key
+- "Duplicate Groups" report section with a verdict per copy: KEEP, REMOVED, DROPPED IN COPY, TO REMOVE (dry run), NOT REMOVED (declined or run failed), NO SETVIDEOID for copies in-place removal cannot touch, and FAILED (removal rejected, with the error)
+- Positional copy rebuild for dedupe (`copy_playlist_without`): entries are dropped by playlist position, so exactly the chosen copy of an identical pair goes (the winner keeps its slot), even on playlists that expose no `setVideoId`
 - API error logs now include the server's message (playlist create/add/remove failures only showed the exception class name before)
 
 ## [0.2.0] - 2026-04-05

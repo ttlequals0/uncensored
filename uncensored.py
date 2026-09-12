@@ -8,7 +8,6 @@ with their explicit versions where available.
 import argparse
 import logging
 import sys
-from collections import Counter
 from datetime import datetime
 
 from rich.console import Console
@@ -16,6 +15,8 @@ from rich.table import Table
 
 from auth import get_client, run_browser_setup
 from replacer import (
+    RemovalReport,
+    ReplacementReport,
     copy_playlist_without,
     remove_from_playlist,
     replace_in_place,
@@ -76,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dedupe",
         action="store_true",
         help="Standalone: find duplicate songs and remove extra copies, keeping the best "
-             "version (explicit > clean, official YTM > YouTube upload). Skips the explicit scan.",
+             "version (official YTM > YouTube upload, then explicit > clean). Skips the explicit scan.",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     parser.add_argument("--version", action="version", version=f"uncensored {__version__}")
@@ -194,31 +195,18 @@ def prompt_dedupe_groups(groups: list[DuplicateGroup]) -> list[TrackInfo]:
     return confirmed
 
 
-def _kept_video_ids(all_tracks: list[dict], exclude: list[TrackInfo]) -> list[str]:
-    """Video ids for a copy rebuild, dropping excluded entries.
-
-    Entries that expose a setVideoId match excluded losers by it exactly.
-    Entries without any setVideoId (unowned playlists serve none) match
-    excluded losers of the same videoId positionally, first occurrence
-    first, so identical unmarked copies still drop one-for-one.
-    """
-    excluded_svids = {t.set_video_id for t in exclude if t.set_video_id}
-    pending_unmarked = Counter(
-        t.video_id for t in exclude if not t.set_video_id and t.video_id
+def _announce_copy(report: ReplacementReport | RemovalReport) -> None:
+    if not report.new_playlist_id:
+        return
+    console.print(
+        f"[green]New playlist created:[/green] "
+        f"https://music.youtube.com/playlist?list={report.new_playlist_id}\n"
     )
-
-    kept = []
-    for t in all_tracks:
-        svid = t.get("setVideoId")
-        if svid and svid in excluded_svids:
-            continue
-        if not svid:
-            vid = t.get("videoId")
-            if vid and pending_unmarked.get(vid, 0) > 0:
-                pending_unmarked[vid] -= 1
-                continue
-        kept.append(t.get("videoId", ""))
-    return kept
+    if report.failed_adds:
+        console.print(
+            f"[yellow]{len(report.failed_adds)} track(s) could not be added to the new playlist "
+            f"(see report).[/yellow]"
+        )
 
 
 def _run_dedupe(
@@ -231,7 +219,8 @@ def _run_dedupe(
     start_time: datetime,
 ) -> None:
     """Standalone --dedupe flow: find duplicate copies, confirm, remove, report."""
-    result = dedupe_playlist(all_tracks, playlist_id)
+    result = dedupe_playlist(all_tracks, playlist_id, copy_mode=use_copy)
+    all_video_ids = [t.get("videoId", "") for t in all_tracks]
     loser_count = sum(len(g.losers) for g in result.groups)
 
     console.print(
@@ -241,7 +230,7 @@ def _run_dedupe(
     if result.skipped_no_set_id:
         console.print(
             f"[yellow]{len(result.skipped_no_set_id)} duplicate copy(ies) missing setVideoId: "
-            f"cannot be removed in-place, but copy mode still drops them.[/yellow]"
+            f"cannot be removed in-place (--copy can drop them).[/yellow]"
         )
 
     mode = MODE_DRY_RUN if args.dry_run else (MODE_COPY if use_copy else MODE_IN_PLACE)
@@ -269,9 +258,7 @@ def _run_dedupe(
 
             if use_copy:
                 console.print(f"\nCreating new playlist: [bold]{copy_name}[/bold]\n")
-                removal_report = copy_playlist_without(
-                    yt, _kept_video_ids(all_tracks, confirmed), copy_name,
-                )
+                removal_report = copy_playlist_without(yt, all_video_ids, confirmed, copy_name)
                 if mode == MODE_IN_PLACE:
                     mode = MODE_COPY_FALLBACK
             else:
@@ -284,18 +271,17 @@ def _run_dedupe(
                     console.print(
                         "[bold yellow]You don't own this playlist. Falling back to copy mode.[/bold yellow]\n"
                     )
-                    removal_report = copy_playlist_without(
-                        yt, _kept_video_ids(all_tracks, confirmed), copy_name,
-                    )
+                    use_copy = True
+                    removal_report = copy_playlist_without(yt, all_video_ids, confirmed, copy_name)
                     mode = MODE_COPY_FALLBACK
 
+            successful = sum(1 for r in removal_report.results if r.success)
+            _announce_copy(removal_report)
             if removal_report.new_playlist_id:
                 console.print(
-                    f"[green]New playlist created:[/green] "
-                    f"https://music.youtube.com/playlist?list={removal_report.new_playlist_id}\n"
+                    f"[green]{successful}[/green] duplicate copy(ies) left out of the new playlist.\n"
                 )
-            if removal_report.results:
-                successful = sum(1 for r in removal_report.results if r.success)
+            elif removal_report.results:
                 console.print(f"[green]{successful}[/green] duplicate copy(ies) removed.\n")
 
     end_time = datetime.now()
@@ -308,7 +294,8 @@ def _run_dedupe(
             start_time=start_time,
             end_time=end_time,
             duplicate_groups=result.groups,
-            dedupe_skipped_no_set_id=result.skipped_no_set_id,
+            # A copy-mode fallback after the scan makes the caveat moot
+            dedupe_skipped_no_set_id=[] if use_copy else result.skipped_no_set_id,
             removal_report=removal_report,
         ),
         output_path=args.output,
@@ -337,7 +324,8 @@ def main() -> None:
     start_time = datetime.now()
     use_copy = args.copy
 
-    if args.playlist_id == LIKED_MUSIC_PLAYLIST_ID and not use_copy and not args.dry_run:
+    # Dry runs switch too, so the preview reflects what a real run would do
+    if args.playlist_id == LIKED_MUSIC_PLAYLIST_ID and not use_copy:
         console.print(
             "[bold yellow]Warning:[/bold yellow] The Liked Music playlist does not support "
             "track removal due to YouTube API limitations.\n"
@@ -354,12 +342,7 @@ def main() -> None:
     total_tracks = len(all_tracks)
     all_video_ids = [t.get("videoId", "") for t in all_tracks]
 
-    if (
-        all_tracks
-        and not use_copy
-        and not args.dry_run
-        and not any(t.get("setVideoId") for t in all_tracks)
-    ):
+    if all_tracks and not use_copy and not any(t.get("setVideoId") for t in all_tracks):
         console.print(
             "[bold yellow]Warning:[/bold yellow] No entries in this playlist expose a "
             "setVideoId, so this account cannot edit it (it is likely not owned by you).\n"
@@ -386,6 +369,7 @@ def main() -> None:
         progress_callback=show_progress,
         allow_video_fallback=args.yt_video,
         playlist_id=args.playlist_id,
+        copy_mode=use_copy,
     )
 
     video_fallback_count = sum(1 for c in scan.unavailable if c.replacement.is_video)
@@ -455,10 +439,11 @@ def main() -> None:
             # Move confirmed video suggestions into unavailable list so the
             # report shows them as applied replacements, not just suggestions
             scan.unavailable.extend(video_confirmed)
-            confirmed_ids = {s.original.video_id for s in video_confirmed}
+            # By position: unavailable originals can share an empty videoId
+            confirmed_positions = {s.original.position for s in video_confirmed}
             scan.unavailable_video_suggestions = [
                 vs for vs in scan.unavailable_video_suggestions
-                if vs.original.video_id not in confirmed_ids
+                if vs.original.position not in confirmed_positions
             ]
 
         mode = MODE_COPY if use_copy else MODE_IN_PLACE
@@ -470,25 +455,23 @@ def main() -> None:
         if use_copy:
             console.print(f"Creating new playlist: [bold]{copy_name}[/bold]\n")
             replacement_report = replace_with_copy(yt, confirmed, all_video_ids, copy_name)
-            if replacement_report.new_playlist_id:
-                console.print(
-                    f"[green]New playlist created:[/green] "
-                    f"https://music.youtube.com/playlist?list={replacement_report.new_playlist_id}\n"
-                )
+            _announce_copy(replacement_report)
         else:
             console.print("Applying replacements...\n")
             replacement_report = replace_in_place(
                 yt, args.playlist_id, confirmed,
                 preserve_position=args.preserve_position,
+                existing_video_ids=set(all_video_ids),
             )
 
             if replacement_report.copy_mode_fallback:
                 console.print(
                     "[bold yellow]You don't own this playlist. Falling back to copy mode.[/bold yellow]\n"
                 )
-                applied_ids = {r.candidate.original.video_id for r in replacement_report.results if r.success}
-                remaining = [s for s in confirmed if s.original.video_id not in applied_ids]
-                replacement_report = replace_with_copy(yt, remaining, all_video_ids, copy_name)
+                # All confirmed swaps: the copy is built from the pre-run track
+                # list, so swaps already applied in place must be applied again
+                replacement_report = replace_with_copy(yt, confirmed, all_video_ids, copy_name)
+                _announce_copy(replacement_report)
                 mode = MODE_COPY_FALLBACK
 
         successful = sum(1 for r in replacement_report.results if r.success)

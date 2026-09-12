@@ -23,6 +23,7 @@ from scanner import (
     normalize_artist,
     normalize_title,
     normalize_title_for_comparison,
+    scan_playlist,
 )
 
 
@@ -467,3 +468,26 @@ class TestFindAvailableMatchVideoFlag:
 
         assert result is video_match
         assert result.is_video is True
+
+
+class TestScanPlaylistSetVideoId:
+    """Clean tracks without a setVideoId (every track on an unowned playlist)."""
+
+    RAW = [{"videoId": "c1", "title": "Song (Clean)", "artists": [{"name": "Artist"}]}]
+
+    @patch("scanner.find_explicit_match")
+    def test_skipped_in_place(self, mock_match):
+        result = scan_playlist(MagicMock(), self.RAW)
+
+        assert [t.video_id for t in result.skipped_no_set_id] == ["c1"]
+        mock_match.assert_not_called()
+
+    @patch("scanner.find_explicit_match")
+    def test_searched_in_copy_mode(self, mock_match):
+        mock_match.return_value = _make_track(video_id="e1")
+
+        result = scan_playlist(MagicMock(), self.RAW, copy_mode=True)
+
+        assert result.skipped_no_set_id == []
+        assert [c.replacement.video_id for c in result.candidates] == ["e1"]
+        assert result.candidates[0].original.position == 0

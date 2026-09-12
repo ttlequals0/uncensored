@@ -14,7 +14,6 @@ from scanner import (
     dedupe_playlist,
     find_duplicates,
 )
-from uncensored import _kept_video_ids
 
 
 def make_track(
@@ -51,6 +50,31 @@ class TestDedupeKey:
 
     def test_live_version_kept_distinct(self):
         assert dedupe_key("Song (Live)", "Artist") != dedupe_key("Song", "Artist")
+
+    def test_non_latin_titles_stay_distinct(self):
+        # The ASCII-only search normalizer reduces both of these to ""
+        assert dedupe_key("夜に駆ける", "YOASOBI") != dedupe_key("群青", "YOASOBI")
+
+    def test_non_latin_artists_stay_distinct(self):
+        assert dedupe_key("Song", "아이유") != dedupe_key("Song", "방탄소년단")
+
+    def test_non_latin_clean_suffix_still_groups(self):
+        assert dedupe_key("夜に駆ける (Clean)", "YOASOBI") == dedupe_key("夜に駆ける", "YOASOBI")
+
+    def test_emoji_decoration_ignored(self):
+        assert dedupe_key("Song \U0001f525", "Artist") == dedupe_key("Song", "Artist")
+        assert dedupe_key("Song ❤️", "Artist") == dedupe_key("Song", "Artist")
+
+    def test_composed_and_decomposed_forms_match(self):
+        nfc = dedupe_key("Café", "Beyoncé")
+        nfd = dedupe_key("Café", "Beyoncé")
+        assert nfc == nfd
+
+    def test_fullwidth_latin_matches(self):
+        assert dedupe_key("Ｓｏｎｇ", "Artist") == dedupe_key("Song", "Artist")
+
+    def test_emoji_only_titles_stay_distinct(self):
+        assert dedupe_key("\U0001f525\U0001f525", "Artist") != dedupe_key("\U0001f480", "Artist")
 
 
 class TestIsDuplicatePair:
@@ -175,6 +199,14 @@ class TestDedupePlaylist:
         assert [t.video_id for t in result.groups[0].losers] == ["l"]
         assert len(result.skipped_no_set_id) == 1
 
+    def test_copy_mode_skips_nothing(self):
+        result = dedupe_playlist([
+            raw("w", "s1", title="Song", is_explicit=True),
+            raw("l", None, title="Song (Clean)"),
+        ], copy_mode=True)
+        assert [t.video_id for t in result.groups[0].losers] == ["l"]
+        assert result.skipped_no_set_id == []
+
     def test_winner_choosen_from_full_group_including_unremovable(self):
         # The winner is picked before the setVideoId filter, so an
         # unremovable explicit copy still beats a removable clean copy.
@@ -185,30 +217,12 @@ class TestDedupePlaylist:
         assert result.groups[0].winner.video_id == "explicit"
         assert [t.video_id for t in result.groups[0].losers] == ["clean"]
 
-
-class TestKeptVideoIds:
-    def test_excludes_by_set_video_id(self):
-        all_tracks = [raw("v1", "s1"), raw("v2", "s2")]
-        exclude = [make_track(video_id="v2", set_video_id="s2")]
-        assert _kept_video_ids(all_tracks, exclude) == ["v1"]
-
-    def test_unmarked_identical_pair_drops_one(self):
-        # Unowned playlists expose no setVideoId at all: positional drop.
-        all_tracks = [{"videoId": "a"}, {"videoId": "a"}, {"videoId": "b"}]
-        exclude = [make_track(video_id="a", set_video_id=None)]
-        assert _kept_video_ids(all_tracks, exclude) == ["a", "b"]
-
-    def test_unmarked_triple_drops_two(self):
-        all_tracks = [{"videoId": "a"}] * 3
-        exclude = [
-            make_track(video_id="a", set_video_id=None),
-            make_track(video_id="a", set_video_id="svx", title="Other"),
-        ]
-        # The svid-marked loser matches nothing (no entry has setVideoId),
-        # so only one positional drop happens.
-        assert _kept_video_ids(all_tracks, exclude) == ["a", "a"]
-
-    def test_marked_entry_survives_unmarked_exclusion(self):
-        all_tracks = [{"videoId": "a", "setVideoId": "s9"}, {"videoId": "a"}]
-        exclude = [make_track(video_id="a", set_video_id=None)]
-        assert _kept_video_ids(all_tracks, exclude) == ["a"]
+    def test_tracks_carry_playlist_position(self):
+        result = dedupe_playlist([
+            raw("x", None, title="Other"),
+            raw("a", None),
+            raw("a", None),
+        ])
+        group = result.groups[0]
+        assert group.winner.position == 1
+        assert [t.position for t in group.losers] == [2]
