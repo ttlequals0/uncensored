@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -53,6 +54,8 @@ class TrackInfo:
     is_available: bool = True
     is_video: bool = False
     video_type: str | None = None
+    # Playlist index (None for search results): the only id unavailable/unowned entries have
+    position: int | None = None
 
 
 @dataclass
@@ -65,6 +68,21 @@ class SwapCandidate:
 class VideoSuggestion:
     original: TrackInfo
     suggestions: list[TrackInfo]
+
+
+@dataclass
+class DuplicateGroup:
+    key: str
+    tracks: list[TrackInfo]
+    winner: TrackInfo
+    losers: list[TrackInfo]
+
+
+@dataclass
+class DedupeResult:
+    groups: list[DuplicateGroup] = field(default_factory=list)
+    skipped_no_set_id: list[TrackInfo] = field(default_factory=list)
+    total_tracks: int = 0
 
 
 @dataclass
@@ -116,8 +134,14 @@ def _primary_artist(name: str) -> str:
     return name
 
 
-def extract_track_info(track: dict) -> TrackInfo:
-    """Convert a raw API track dict into a TrackInfo dataclass."""
+def extract_track_info(
+    track: dict, playlist_id: str | None = None, position: int | None = None,
+) -> TrackInfo:
+    """Convert a raw API track dict into a TrackInfo dataclass.
+
+    playlist_id pins playlist-entry links to the playlist context; without it
+    YouTube Music remaps standalone watch URLs to a different video.
+    """
     artists = track.get("artists") or []
     artist_name = artists[0]["name"] if artists else "Unknown"
 
@@ -137,10 +161,12 @@ def extract_track_info(track: dict) -> TrackInfo:
         album=album_name,
         duration_seconds=track.get("duration_seconds", 0),
         thumbnail_url=thumbnail_url,
-        ytm_link=f"https://music.youtube.com/watch?v={video_id}",
+        ytm_link=f"https://music.youtube.com/watch?v={video_id}"
+        + (f"&list={playlist_id}" if playlist_id else ""),
         is_explicit=track.get("isExplicit", False),
         is_available=track.get("isAvailable", True),
         video_type=track.get("videoType"),
+        position=position,
     )
 
 
@@ -370,14 +396,20 @@ def scan_playlist(
     tracks: list[dict],
     progress_callback: Callable | None = None,
     allow_video_fallback: bool = False,
+    playlist_id: str | None = None,
+    copy_mode: bool = False,
 ) -> ScanResult:
-    """Scan pre-fetched tracks and find explicit replacements for clean ones."""
+    """Scan pre-fetched tracks and find explicit replacements for clean ones.
+
+    copy_mode: the swaps go into a new playlist, so tracks without a
+    setVideoId (never removable in-place) are still searched.
+    """
     logger.info("Scanning %d tracks", len(tracks))
     result = ScanResult()
     total = len(tracks)
 
     for i, raw_track in enumerate(tracks):
-        track = extract_track_info(raw_track)
+        track = extract_track_info(raw_track, playlist_id, position=i)
         logger.debug("[%d/%d] Processing: %s - %s", i + 1, total, track.artist, track.title)
 
         # Handle unavailable tracks -- find any working replacement
@@ -418,7 +450,7 @@ def scan_playlist(
                 progress_callback(i + 1, total, track, "explicit")
             continue
 
-        if track.set_video_id is None:
+        if track.set_video_id is None and not copy_mode:
             logger.warning(
                 "Track '%s' by %s has no setVideoId -- cannot be removed. Skipping.",
                 track.title, track.artist,
@@ -461,5 +493,104 @@ def scan_playlist(
         else:
             result.not_found.append(track)
             logger.info("No explicit version found for: '%s' by %s", track.title, track.artist)
+
+    return result
+
+
+def _keep_chars(text: str, drop: str) -> str:
+    """Drop chars whose Unicode category starts with a letter in drop, plus emoji
+    variation selectors. Unlike a word-char regex, combining marks survive."""
+    return "".join(
+        c for c in text
+        if unicodedata.category(c)[0] not in drop and not "\ufe00" <= c <= "\ufe0f"
+    )
+
+
+def dedupe_key(title: str, artist: str) -> str:
+    """Canonical key for duplicate detection: same song, any version. Keeps
+    non-ASCII letters (the search normalizers strip them) and ignores emoji."""
+    # NFKC: the same text in composed and decomposed (or fullwidth) form must match
+    title = unicodedata.normalize("NFKC", title)
+    artist = unicodedata.normalize("NFKC", artist)
+    title_core = _FEAT_SUFFIXES.sub("", CLEAN_SUFFIXES.sub("", title))
+    title_key = " ".join(_keep_chars(title_core, "SC").casefold().split())
+    # Dropping punctuation leaves the double space _primary_artist splits on
+    artist_key = _primary_artist(_keep_chars(artist, "SCP").casefold().strip())
+    return f"{title_key or title.strip().casefold()}|{artist_key or artist.strip().casefold()}"
+
+
+def _is_duplicate_pair(a: TrackInfo, b: TrackInfo) -> bool:
+    """True when two tracks are the same song (identical upload, or same
+    version family within the duration tolerance). Duration 0 = unknown:
+    only identical videoIds group in that case."""
+    if a.video_id and a.video_id == b.video_id:
+        return True
+    if a.duration_seconds <= 0 or b.duration_seconds <= 0:
+        return False
+    return abs(a.duration_seconds - b.duration_seconds) <= DURATION_TOLERANCE
+
+
+def _dedupe_winner(tracks: list[TrackInfo]) -> TrackInfo:
+    """Best copy: available > unavailable, official > UGC, explicit > clean.
+    min() is stable, so the earliest playlist position wins ties."""
+    return min(tracks, key=lambda t: (
+        not t.is_available,
+        t.video_type == VIDEO_TYPE_UGC,
+        not t.is_explicit,
+    ))
+
+
+def find_duplicates(tracks: list[TrackInfo]) -> list[DuplicateGroup]:
+    """Group playlist-ordered tracks into duplicate groups of >= 2.
+
+    Buckets by dedupe key, then clusters greedily against the bucket's first
+    track (anchor) so duration windows cannot chain transitively
+    (100s/108s/116s stays two groups instead of one).
+    """
+    buckets: dict[str, list[TrackInfo]] = {}
+    for track in tracks:
+        buckets.setdefault(dedupe_key(track.title, track.artist), []).append(track)
+
+    groups: list[DuplicateGroup] = []
+    for key, bucket in buckets.items():
+        clusters: list[list[TrackInfo]] = []
+        for track in bucket:
+            for cluster in clusters:
+                if _is_duplicate_pair(cluster[0], track):
+                    cluster.append(track)
+                    break
+            else:
+                clusters.append([track])
+
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            winner = _dedupe_winner(cluster)
+            losers = [t for t in cluster if t is not winner]
+            groups.append(DuplicateGroup(key=key, tracks=cluster, winner=winner, losers=losers))
+
+    return groups
+
+
+def dedupe_playlist(
+    raw_tracks: list[dict], playlist_id: str | None = None, copy_mode: bool = False,
+) -> DedupeResult:
+    """Find duplicate songs in raw playlist tracks (no network calls).
+
+    Losers without setVideoId stay in their group (copy mode can still
+    drop them). For in-place runs they are also listed in skipped_no_set_id.
+    """
+    tracks = [extract_track_info(t, playlist_id, position=i) for i, t in enumerate(raw_tracks)]
+    result = DedupeResult(total_tracks=len(tracks))
+
+    for group in find_duplicates(tracks):
+        for loser in group.losers:
+            if loser.set_video_id is None and not copy_mode:
+                logger.warning(
+                    "Duplicate loser '%s' by %s has no setVideoId -- cannot be removed in-place.",
+                    loser.title, loser.artist,
+                )
+                result.skipped_no_set_id.append(loser)
+        result.groups.append(group)
 
     return result

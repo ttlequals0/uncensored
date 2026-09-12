@@ -73,6 +73,12 @@
     background: var(--card-bg); color: var(--orange); border: 1px solid var(--orange);
     margin-left: 4px; vertical-align: middle;
   }
+  .keep-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    background: var(--card-bg); color: var(--green); border: 1px solid var(--green);
+  }
+  .group-heading { margin: 16px 0 8px; font-size: 1rem; }
 </style>
 </head>
 <body>
@@ -107,6 +113,21 @@
 </tr>
 {% endmacro %}
 
+{% macro track_row(track) %}
+<tr>
+  <td>
+    {% if track.thumbnail_url %}
+    <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
+    {% else %}
+    <span class="thumb-placeholder"></span>
+    {% endif %}
+  </td>
+  <td>{{ track.title }}</td>
+  <td>{{ track.artist }}</td>
+  <td><a href="{{ track.ytm_link }}">link</a></td>
+</tr>
+{% endmacro %}
+
 <div class="header">
   <h1>uncensored report</h1>
   <p><a href="{{ playlist_url }}">{{ playlist_title }}</a></p>
@@ -124,6 +145,65 @@
 {% if copy_mode_fallback %}
 <div class="fallback-warning">
   You do not own this playlist. The tool automatically fell back to copy mode.
+</div>
+{% endif %}
+
+{% if failed_adds %}
+<div class="fallback-warning">
+  {{ failed_adds|length }} track(s) could not be added to the new playlist:
+  {% for vid in failed_adds %}<a href="https://music.youtube.com/watch?v={{ vid }}">{{ vid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+</div>
+{% endif %}
+
+{% if dedupe_view %}
+<div class="section">
+  <h2>Duplicate Groups ({{ dedupe_view|length }})</h2>
+  {% for group in dedupe_view %}
+  <h3 class="group-heading">{{ group.winner.title }} - {{ group.winner.artist }}</h3>
+  <table>
+    <thead>
+      <tr><th></th><th>Track</th><th>Verdict</th></tr>
+    </thead>
+    <tbody>
+      {% for row in group.rows %}
+      <tr>
+        <td>
+          {% if row.track.thumbnail_url %}
+          <img class="thumb" src="{{ row.track.thumbnail_url }}" alt="">
+          {% else %}
+          <span class="thumb-placeholder"></span>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ row.track.title }}</strong>
+          {% if row.track.is_explicit %}<span class="video-badge" style="color: var(--green); border-color: var(--green)">E</span>{% endif %}
+          {% if row.track.video_type == 'MUSIC_VIDEO_TYPE_UGC' %}<span class="video-badge">YT Video</span>{% endif %}<br>
+          <span style="color: var(--muted)">{{ row.track.artist }}</span><br>
+          <a href="{{ row.track.ytm_link }}">link</a>
+        </td>
+        <td>
+          {% if row.status == 'keep' %}
+            <span class="keep-badge">KEEP</span>
+          {% elif row.status == 'removed' %}
+            <span class="status-ok">REMOVED</span>
+          {% elif row.status == 'pending' %}
+            <span class="status-warn">TO REMOVE</span>
+          {% elif row.status == 'no-setvideo-id' %}
+            <span class="status-warn">NO SETVIDEOID</span>
+          {% elif row.status == 'dropped-in-copy' %}
+            <span class="status-ok">DROPPED IN COPY</span>
+          {% elif row.status == 'not-removed' %}
+            <span class="status-warn">NOT REMOVED</span>
+          {% else %}
+            <span class="status-err">FAILED</span>
+            {% if row.error %}<br><small style="color: var(--muted)">{{ row.error }}</small>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
 </div>
 {% endif %}
 
@@ -237,18 +317,7 @@
     </thead>
     <tbody>
       {% for track in unavailable_not_found %}
-      <tr>
-        <td>
-          {% if track.thumbnail_url %}
-          <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
-          {% else %}
-          <span class="thumb-placeholder"></span>
-          {% endif %}
-        </td>
-        <td>{{ track.title }}</td>
-        <td>{{ track.artist }}</td>
-        <td><a href="{{ track.ytm_link }}">link</a></td>
-      </tr>
+      {{ track_row(track) }}
       {% endfor %}
     </tbody>
   </table>
@@ -307,27 +376,16 @@
     </thead>
     <tbody>
       {% for track in not_found %}
-      <tr>
-        <td>
-          {% if track.thumbnail_url %}
-          <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
-          {% else %}
-          <span class="thumb-placeholder"></span>
-          {% endif %}
-        </td>
-        <td>{{ track.title }}</td>
-        <td>{{ track.artist }}</td>
-        <td><a href="{{ track.ytm_link }}">link</a></td>
-      </tr>
+      {{ track_row(track) }}
       {% endfor %}
     </tbody>
   </table>
 </div>
 {% endif %}
 
-{% if skipped_no_set_id %}
+{% if skipped_no_set_id or dedupe_skipped %}
 <div class="section">
-  <h2>Skipped -- Missing setVideoId ({{ skipped_no_set_id|length }})</h2>
+  <h2>Skipped -- Missing setVideoId ({{ (skipped_no_set_id + dedupe_skipped)|length }})</h2>
   <p style="color: var(--muted); margin-bottom: 8px; font-size: 0.875rem;">
     These tracks could not be removed from the playlist because the API did not return a setVideoId.
   </p>
@@ -336,19 +394,8 @@
       <tr><th></th><th>Title</th><th>Artist</th><th>Link</th></tr>
     </thead>
     <tbody>
-      {% for track in skipped_no_set_id %}
-      <tr>
-        <td>
-          {% if track.thumbnail_url %}
-          <img class="thumb" src="{{ track.thumbnail_url }}" alt="">
-          {% else %}
-          <span class="thumb-placeholder"></span>
-          {% endif %}
-        </td>
-        <td>{{ track.title }}</td>
-        <td>{{ track.artist }}</td>
-        <td><a href="{{ track.ytm_link }}">link</a></td>
-      </tr>
+      {% for track in dedupe_skipped + skipped_no_set_id %}
+      {{ track_row(track) }}
       {% endfor %}
     </tbody>
   </table>
@@ -363,6 +410,9 @@
     <dt>Total tracks</dt><dd>{{ total_tracks }}</dd>
     <dt>Already explicit</dt><dd>{{ already_explicit }}</dd>
     <dt>{{ replacements_label }}</dt><dd>{{ replacements_count }}</dd>
+    {% if duplicate_group_count > 0 %}
+    <dt>Duplicate groups</dt><dd>{{ duplicate_group_count }}</dd>
+    {% endif %}
     <dt>No explicit version found</dt><dd>{{ not_found_count }}</dd>
     {% if video_fallback_count > 0 %}
     <dt>YouTube video fallbacks</dt><dd>{{ video_fallback_count }}</dd>
@@ -384,6 +434,9 @@
     {% endif %}
     {% if duplicates > 0 %}
     <dt>Duplicate warnings</dt><dd>{{ duplicates }}</dd>
+    {% endif %}
+    {% if failed_adds %}
+    <dt>Missing from new playlist</dt><dd>{{ failed_adds|length }}</dd>
     {% endif %}
   </dl>
 </div>
