@@ -1,5 +1,7 @@
 """Tests for replacer module -- in-place replacement and moveItem gating."""
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -8,7 +10,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from replacer import replace_in_place
+from replacer import (
+    copy_playlist_without,
+    remove_from_playlist,
+    replace_in_place,
+    replace_with_copy,
+)
 from scanner import SwapCandidate, TrackInfo
 
 
@@ -89,3 +96,109 @@ class TestReplaceInPlacePreservePosition:
         replace_in_place(yt, "PL123", [swap], preserve_position=True)
 
         assert _move_calls(yt) == []
+
+
+class TestRemoveFromPlaylist:
+    def test_one_call_per_track_with_exact_pair(self):
+        yt = _mock_yt()
+        tracks = [
+            _track("v1", "One", set_video_id="s1"),
+            _track("v2", "Two", set_video_id="s2"),
+        ]
+        report = remove_from_playlist(yt, "PL123", tracks)
+
+        assert yt.remove_playlist_items.call_args_list == [
+            (("PL123", [{"videoId": "v1", "setVideoId": "s1"}]), {}),
+            (("PL123", [{"videoId": "v2", "setVideoId": "s2"}]), {}),
+        ]
+        assert yt.add_playlist_items.call_count == 0
+        assert all(r.success for r in report.results)
+
+    def test_403_triggers_copy_fallback_and_stops(self):
+        yt = _mock_yt()
+        yt.remove_playlist_items.side_effect = Exception("403 Forbidden")
+        tracks = [
+            _track("v1", "One", set_video_id="s1"),
+            _track("v2", "Two", set_video_id="s2"),
+        ]
+        report = remove_from_playlist(yt, "PL123", tracks)
+
+        assert report.copy_mode_fallback is True
+        assert yt.remove_playlist_items.call_count == 1
+        assert len(report.results) == 1
+
+    def test_other_error_recorded_and_continues(self):
+        yt = _mock_yt()
+        yt.remove_playlist_items.side_effect = [Exception("network blip"), "ok"]
+        tracks = [
+            _track("v1", "One", set_video_id="s1"),
+            _track("v2", "Two", set_video_id="s2"),
+        ]
+        report = remove_from_playlist(yt, "PL123", tracks)
+
+        assert report.copy_mode_fallback is False
+        assert len(report.results) == 2
+        assert report.results[0].success is False
+        assert report.results[1].success is True
+
+
+class TestReplaceWithCopy:
+    def test_original_without_video_id_still_swapped(self):
+        """Unavailable originals may have no videoId; the replacement must
+        not be filtered out before the swap map is applied."""
+        yt = _mock_yt()
+        yt.create_playlist.return_value = "PLnew"
+        swap = SwapCandidate(
+            original=_track(None, "Unavailable", set_video_id=None),
+            replacement=_track("new_vid", "Explicit"),
+        )
+
+        replace_with_copy(yt, [swap], [None, "a"], "Copy")
+
+        yt.add_playlist_items.assert_called_once_with(
+            "PLnew", ["new_vid", "a"], duplicates=True
+        )
+
+
+class TestCopyPlaylistWithout:
+    def test_creates_playlist_and_batches(self):
+        yt = _mock_yt()
+        yt.create_playlist.return_value = "PLnew"
+        ids = [f"v{i}" for i in range(30)]
+
+        report = copy_playlist_without(yt, ids, "Copy Name")
+
+        assert report.new_playlist_id == "PLnew"
+        assert report.new_playlist_title == "Copy Name"
+        calls = yt.add_playlist_items.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args == ("PLnew", ids[:25])
+        assert calls[1].args == ("PLnew", ids[25:])
+        assert all(c.kwargs.get("duplicates") is True for c in calls)
+
+    def test_duplicate_ids_kept_positionally(self):
+        yt = _mock_yt()
+        yt.create_playlist.return_value = "PLnew"
+
+        copy_playlist_without(yt, ["a", "a", "b"], "Copy")
+
+        yt.add_playlist_items.assert_called_once_with("PLnew", ["a", "a", "b"], duplicates=True)
+
+    def test_empty_ids_skipped(self):
+        yt = _mock_yt()
+        yt.create_playlist.return_value = "PLnew"
+
+        copy_playlist_without(yt, ["a", "", "b"], "Copy")
+
+        yt.add_playlist_items.assert_called_once_with("PLnew", ["a", "b"], duplicates=True)
+
+    def test_batch_failure_retries_individually(self):
+        yt = _mock_yt()
+        yt.create_playlist.return_value = "PLnew"
+        yt.add_playlist_items.side_effect = [Exception("batch failed"), "ok", "ok"]
+
+        copy_playlist_without(yt, ["a", "b"], "Copy")
+
+        assert yt.add_playlist_items.call_count == 3
+        assert yt.add_playlist_items.call_args_list[1].args == ("PLnew", ["a"])
+        assert yt.add_playlist_items.call_args_list[2].args == ("PLnew", ["b"])

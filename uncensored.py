@@ -8,13 +8,19 @@ with their explicit versions where available.
 import argparse
 import logging
 import sys
+from collections import Counter
 from datetime import datetime
 
 from rich.console import Console
 from rich.table import Table
 
 from auth import get_client, run_browser_setup
-from replacer import replace_in_place, replace_with_copy
+from replacer import (
+    copy_playlist_without,
+    remove_from_playlist,
+    replace_in_place,
+    replace_with_copy,
+)
 from reporter import (
     MODE_COPY,
     MODE_COPY_FALLBACK,
@@ -24,7 +30,15 @@ from reporter import (
     generate_report,
     open_report,
 )
-from scanner import LIKED_MUSIC_PLAYLIST_ID, SwapCandidate, TrackInfo, VideoSuggestion, scan_playlist
+from scanner import (
+    LIKED_MUSIC_PLAYLIST_ID,
+    DuplicateGroup,
+    SwapCandidate,
+    TrackInfo,
+    VideoSuggestion,
+    dedupe_playlist,
+    scan_playlist,
+)
 
 __version__ = "0.2.0"
 
@@ -58,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep replacement tracks in the original track's playlist position. "
              "Flips the playlist to Manual sort in YouTube Music.",
     )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="Standalone: find duplicate songs and remove extra copies, keeping the best "
+             "version (explicit > clean, official YTM > YouTube upload). Skips the explicit scan.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     parser.add_argument("--version", action="version", version=f"uncensored {__version__}")
     return parser
@@ -70,7 +90,17 @@ def _track_table(title: str, track: TrackInfo) -> Table:
     table.add_row("Title", track.title)
     table.add_row("Artist", track.artist)
     table.add_row("Link", track.ytm_link)
+    if not track.is_available:
+        table.add_row("Status", "[red]Unavailable on YouTube Music[/red]")
     return table
+
+
+def _ask_ynaq(question: str) -> str:
+    while True:
+        response = console.input(question).strip().lower()
+        if response in ("y", "n", "a", "q"):
+            return response
+        console.print("[dim]Please enter y, n, a, or q.[/dim]")
 
 
 def prompt_confirmations(candidates: list[SwapCandidate], label: str = "Clean") -> list[SwapCandidate]:
@@ -86,21 +116,15 @@ def prompt_confirmations(candidates: list[SwapCandidate], label: str = "Clean") 
         console.print(_track_table("Current", swap.original))
         console.print(_track_table(f"Replacement{video_tag}", swap.replacement))
 
-        while True:
-            response = console.input("[bold][y][/bold] Yes  [bold][n][/bold] No  [bold][a][/bold] Accept All  [bold][q][/bold] Quit: ").strip().lower()
-            if response == "y":
-                confirmed.append(swap)
-                break
-            elif response == "n":
-                break
-            elif response == "a":
-                confirmed.append(swap)
-                confirmed.extend(candidates[i + 1:])
-                return confirmed
-            elif response == "q":
-                return confirmed
-            else:
-                console.print("[dim]Please enter y, n, a, or q.[/dim]")
+        response = _ask_ynaq("[bold][y][/bold] Yes  [bold][n][/bold] No  [bold][a][/bold] Accept All  [bold][q][/bold] Quit: ")
+        if response == "y":
+            confirmed.append(swap)
+        elif response == "a":
+            confirmed.append(swap)
+            confirmed.extend(candidates[i + 1:])
+            return confirmed
+        elif response == "q":
+            return confirmed
 
     return confirmed
 
@@ -137,6 +161,160 @@ def prompt_video_suggestions(suggestions: list[VideoSuggestion]) -> list[SwapCan
                 console.print(f"[dim]Please enter {choices}, s, or q.[/dim]")
 
     return confirmed
+
+
+def prompt_dedupe_groups(groups: list[DuplicateGroup]) -> list[TrackInfo]:
+    """Interactively confirm which duplicate copies to remove, group by group."""
+    confirmed: list[TrackInfo] = []
+    total = len(groups)
+
+    for i, group in enumerate(groups):
+        if not group.losers:
+            continue
+
+        console.print(f"\n[bold]Group {i + 1} of {total}[/bold]")
+        console.print(_track_table("Keep (best version)", group.winner))
+
+        for loser in group.losers:
+            console.print(_track_table("Remove", loser))
+
+        response = _ask_ynaq(
+            f"Remove {len(group.losers)} duplicate copy(ies)? "
+            "[bold][y][/bold] Yes  [bold][n][/bold] No  [bold][a][/bold] Accept All  [bold][q][/bold] Quit: "
+        )
+        if response == "y":
+            confirmed.extend(group.losers)
+        elif response == "a":
+            confirmed.extend(group.losers)
+            confirmed.extend(t for g in groups[i + 1:] for t in g.losers)
+            return confirmed
+        elif response == "q":
+            return confirmed
+
+    return confirmed
+
+
+def _kept_video_ids(all_tracks: list[dict], exclude: list[TrackInfo]) -> list[str]:
+    """Video ids for a copy rebuild, dropping excluded entries.
+
+    Entries that expose a setVideoId match excluded losers by it exactly.
+    Entries without any setVideoId (unowned playlists serve none) match
+    excluded losers of the same videoId positionally, first occurrence
+    first, so identical unmarked copies still drop one-for-one.
+    """
+    excluded_svids = {t.set_video_id for t in exclude if t.set_video_id}
+    pending_unmarked = Counter(
+        t.video_id for t in exclude if not t.set_video_id and t.video_id
+    )
+
+    kept = []
+    for t in all_tracks:
+        svid = t.get("setVideoId")
+        if svid and svid in excluded_svids:
+            continue
+        if not svid:
+            vid = t.get("videoId")
+            if vid and pending_unmarked.get(vid, 0) > 0:
+                pending_unmarked[vid] -= 1
+                continue
+        kept.append(t.get("videoId", ""))
+    return kept
+
+
+def _run_dedupe(
+    args,
+    yt,
+    playlist_id: str,
+    playlist_title: str,
+    all_tracks: list[dict],
+    use_copy: bool,
+    start_time: datetime,
+) -> None:
+    """Standalone --dedupe flow: find duplicate copies, confirm, remove, report."""
+    result = dedupe_playlist(all_tracks, playlist_id)
+    loser_count = sum(len(g.losers) for g in result.groups)
+
+    console.print(
+        f"\nFound [bold]{len(result.groups)}[/bold] duplicate group(s) across "
+        f"[bold]{result.total_tracks}[/bold] songs ({loser_count} extra copies)."
+    )
+    if result.skipped_no_set_id:
+        console.print(
+            f"[yellow]{len(result.skipped_no_set_id)} duplicate copy(ies) missing setVideoId: "
+            f"cannot be removed in-place, but copy mode still drops them.[/yellow]"
+        )
+
+    mode = MODE_DRY_RUN if args.dry_run else (MODE_COPY if use_copy else MODE_IN_PLACE)
+    removal_report = None
+
+    if args.dry_run:
+        console.print("[dim]Dry run -- no changes made.[/dim]\n")
+    elif loser_count == 0:
+        console.print("No duplicates to remove.\n")
+    else:
+        if args.yes:
+            console.print(f"Removing [bold]{loser_count}[/bold] duplicate copies (--yes).")
+            confirmed = [t for g in result.groups for t in g.losers]
+        else:
+            confirmed = prompt_dedupe_groups(result.groups)
+
+        if confirmed:
+            copy_name = args.copy_name or f"{playlist_title} [Uncensored]"
+            if not use_copy and not any(t.set_video_id for t in confirmed):
+                console.print(
+                    "[bold yellow]None of the confirmed copies can be removed in-place "
+                    "(missing setVideoId). Falling back to copy mode.[/bold yellow]\n"
+                )
+                use_copy = True
+
+            if use_copy:
+                console.print(f"\nCreating new playlist: [bold]{copy_name}[/bold]\n")
+                removal_report = copy_playlist_without(
+                    yt, _kept_video_ids(all_tracks, confirmed), copy_name,
+                )
+                if mode == MODE_IN_PLACE:
+                    mode = MODE_COPY_FALLBACK
+            else:
+                console.print(f"\nRemoving {len(confirmed)} duplicate copies...\n")
+                removal_report = remove_from_playlist(
+                    yt, playlist_id, [t for t in confirmed if t.set_video_id],
+                )
+
+                if removal_report.copy_mode_fallback:
+                    console.print(
+                        "[bold yellow]You don't own this playlist. Falling back to copy mode.[/bold yellow]\n"
+                    )
+                    removal_report = copy_playlist_without(
+                        yt, _kept_video_ids(all_tracks, confirmed), copy_name,
+                    )
+                    mode = MODE_COPY_FALLBACK
+
+            if removal_report.new_playlist_id:
+                console.print(
+                    f"[green]New playlist created:[/green] "
+                    f"https://music.youtube.com/playlist?list={removal_report.new_playlist_id}\n"
+                )
+            if removal_report.results:
+                successful = sum(1 for r in removal_report.results if r.success)
+                console.print(f"[green]{successful}[/green] duplicate copy(ies) removed.\n")
+
+    end_time = datetime.now()
+    report_path = generate_report(
+        ReportContext(
+            playlist_title=playlist_title,
+            playlist_id=playlist_id,
+            mode=mode,
+            total_tracks=result.total_tracks,
+            start_time=start_time,
+            end_time=end_time,
+            duplicate_groups=result.groups,
+            dedupe_skipped_no_set_id=result.skipped_no_set_id,
+            removal_report=removal_report,
+        ),
+        output_path=args.output,
+    )
+    console.print(f"Report saved to: [bold]{report_path}[/bold]")
+    open_report(report_path)
 
 
 def main() -> None:
@@ -176,6 +354,23 @@ def main() -> None:
     total_tracks = len(all_tracks)
     all_video_ids = [t.get("videoId", "") for t in all_tracks]
 
+    if (
+        all_tracks
+        and not use_copy
+        and not args.dry_run
+        and not any(t.get("setVideoId") for t in all_tracks)
+    ):
+        console.print(
+            "[bold yellow]Warning:[/bold yellow] No entries in this playlist expose a "
+            "setVideoId, so this account cannot edit it (it is likely not owned by you).\n"
+            "Automatically switching to [bold]--copy[/bold] mode.\n"
+        )
+        use_copy = True
+
+    if args.dedupe:
+        _run_dedupe(args, yt, args.playlist_id, playlist_title, all_tracks, use_copy, start_time)
+        return
+
     def show_progress(current, total, track, status):
         if status == "searching":
             console.print(f"  [{current}/{total}] Searching: {track.artist} - {track.title}")
@@ -190,6 +385,7 @@ def main() -> None:
         yt, all_tracks,
         progress_callback=show_progress,
         allow_video_fallback=args.yt_video,
+        playlist_id=args.playlist_id,
     )
 
     video_fallback_count = sum(1 for c in scan.unavailable if c.replacement.is_video)

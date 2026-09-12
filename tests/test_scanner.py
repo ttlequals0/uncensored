@@ -139,6 +139,11 @@ class TestExtractTrackInfo:
         assert track.ytm_link == "https://music.youtube.com/watch?v=abc123"
         assert track.is_explicit is True
 
+    def test_link_pinned_to_playlist(self):
+        raw = {"videoId": "abc123", "title": "T", "artists": [{"name": "A"}]}
+        track = extract_track_info(raw, playlist_id="PLxyz")
+        assert track.ytm_link == "https://music.youtube.com/watch?v=abc123&list=PLxyz"
+
     def test_missing_optional_fields(self):
         raw = {
             "videoId": "xyz",

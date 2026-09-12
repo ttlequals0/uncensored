@@ -2,11 +2,11 @@
 
 > Upgrade your playlist. No edits.
 
-A Python CLI tool that scans a YouTube Music playlist and replaces clean/edited songs with explicit versions, and finds working replacements for unavailable tracks.
+A Python CLI tool that scans a YouTube Music playlist and replaces clean/edited songs with explicit versions, finds working replacements for unavailable tracks, and removes duplicate songs.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (package manager)
 - A YouTube Music account (Premium not required)
 
@@ -70,6 +70,12 @@ uv run uncensored PLxxxxxxx --yt-video
 
 # Preserve the original track's playlist position (flips playlist to Manual sort)
 uv run uncensored PLxxxxxxx --preserve-position
+
+# Find and remove duplicate songs (standalone, no explicit scan)
+uv run uncensored PLxxxxxxx --dedupe
+
+# Audit duplicates without removing anything
+uv run uncensored PLxxxxxxx --dedupe --dry-run
 
 # Custom report output path
 uv run uncensored PLxxxxxxx --output report.html
@@ -161,7 +167,22 @@ Pass `--preserve-position` to restore the old behavior: the replacement is moved
 
 Creates a new playlist with all tracks from the original, but with clean tracks swapped for their explicit versions. The original playlist is not modified. Duplicate tracks are preserved in the copy.
 
-If you don't own the playlist, the tool detects the permission error on the first replacement attempt and automatically falls back to copy mode.
+If you don't own the playlist, the tool detects it up front (no entries expose a `setVideoId`, which YouTube Music only serves for playlists you can edit) or catches the permission error on the first attempt, and automatically switches to copy mode.
+
+### Dedupe mode (`--dedupe`)
+
+Standalone pass that finds duplicate songs in the playlist and removes extra copies. It replaces the normal explicit-replacement scan for that run.
+
+Two entries are duplicates when they are the same upload (identical video id) or share a normalized title + primary artist key with durations within 10 seconds of each other. Clean/explicit/radio-edit variants group together; live or remix versions with different lengths or suffixed titles stay separate.
+
+For each group the tool keeps the best copy and removes the rest:
+
+1. Available over unavailable
+2. Official YouTube Music track over user-uploaded YouTube video
+3. Explicit over clean
+4. Earliest playlist position breaks ties
+
+Each group is confirmed interactively (y/n/a/q) before anything is removed. `--dry-run` reports without removing; `--copy` builds a new playlist without the extra copies; `--yes` skips every confirmation and removes all detected duplicates -- use with care. Unowned playlists and Liked Music fall back to copy mode automatically; the copy drops every confirmed duplicate, including copies that lack a `setVideoId` and could never be removed in-place.
 
 ## Known Limitations
 
@@ -169,8 +190,11 @@ If you don't own the playlist, the tool detects the permission error on the firs
 - User-uploaded YouTube videos work best when the title follows an `"Artist - Song"` pattern. Titles without that format (e.g. just a song name with a channel as the artist) may not match
 - `ytmusicapi` is an unofficial, reverse-engineered library -- it may break if YouTube Music changes their web client
 - The Liked Music playlist does not support track removal (the tool auto-switches to copy mode)
-- Tracks missing a `setVideoId` from the API cannot be removed from playlists
+- Tracks missing a `setVideoId` from the API cannot be removed from playlists (copy mode can still drop them from the new playlist)
+- Playlists you don't own expose no `setVideoId` at all; the tool switches to copy mode automatically
 - Browser auth headers expire periodically -- re-run `--setup` if you get auth errors
+- Dedupe groups need a known duration to pair different uploads of the same song; two copies of the same song that both report an unknown duration (but different video ids) are not merged. Identical video ids always merge regardless of duration
+- Dedupe matching is exact-title based: the same song titled differently across copies (e.g. a misspelling in a user upload) will not group
 - Replacement tracks always get a fresh `dateAdded` timestamp -- YouTube Music does not expose any API to preserve the original track's `dateAdded`. When the playlist is sorted by "Recently added" in the UI, replaced tracks will cluster at the top of the list. Use `--copy` to start fresh with clean timestamps on a new playlist, at the cost of a new playlist URL
 
 ## Report
